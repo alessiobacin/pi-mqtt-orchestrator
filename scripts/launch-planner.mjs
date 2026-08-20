@@ -43,7 +43,7 @@
 // (quello del pacchetto, non quello del progetto).
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -141,6 +141,44 @@ export function runLaunchPlanner({ packageRoot, cwd, argv }) {
 				`Esegui prima \`po init --name "<nome progetto>"\` (o \`node scripts/create-project.mjs ...\` in locale), poi rilancia da lì.`,
 		);
 		process.exit(1);
+	}
+
+	// Revisione 34 — caso reale osservato dall'operatore: un progetto
+	// scaffoldato da una versione di `po init` PRECEDENTE alla Revisione 33
+	// ha ancora una copia locale di extensions/orchestrator.ts sul disco
+	// (creata prima che create-project.mjs smettesse di copiarla). Quella
+	// copia stale continua a triggerare `hasLocalExtension` qui sopra, quindi
+	// il comando composto include ancora `-e extensions/orchestrator.ts` —
+	// che torna a duplicare ogni tool/flag se l'estensione è ANCHE installata
+	// globalmente (il caso normale), esattamente lo stesso traceback della
+	// Revisione 33 ("Tool ... conflicts with ...", "Flag ... conflicts with
+	// ..."), stavolta causato da un residuo di scaffold vecchio invece che da
+	// una scelta del codice. Euristica per distinguere questo caso dal
+	// legittimo "dentro il repo del pacchetto stesso, in sviluppo": il
+	// package.json del pacchetto ha sempre name === "pi-mqtt-orchestrator";
+	// un progetto scaffoldato da `po init` ha sempre uno slug diverso (viene
+	// da --name, vedi create-project.mjs). Non blocca l'avvio (potrebbe
+	// esserci un motivo legittimo non previsto) — stampa solo un avviso
+	// esplicito e concreto, con il comando pronto da copiare per risolvere.
+	if (hasLocalExtension) {
+		let cwdPkgName;
+		try {
+			cwdPkgName = JSON.parse(readFileSync(path.join(cwd, "package.json"), "utf-8")).name;
+		} catch {
+			cwdPkgName = undefined;
+		}
+		const looksLikePackageRepo = cwdPkgName === "pi-mqtt-orchestrator";
+		if (!looksLikePackageRepo) {
+			console.warn(
+				`launch-planner: ATTENZIONE — trovato "${orchestratorPath}" in un progetto che non sembra il repo del pacchetto stesso.\n` +
+					`Se l'estensione è ANCHE installata globalmente (pi extension install / npm install -g — il caso normale), questa copia\n` +
+					`locale verrà caricata ANCHE lei con -e, duplicando ogni tool/flag e facendo fallire pi con "Tool ... conflicts with ...".\n` +
+					`È quasi certamente un residuo di uno scaffold creato da una versione di \`po init\` precedente alla Revisione 33 (che non\n` +
+					`copia più extensions/ — vedi docs/mvp-notes.md). Se non stai sviluppando il pacchetto stesso, risolvi rimuovendo la cartella:\n` +
+					`  ${process.platform === "win32" ? "Remove-Item -Recurse -Force" : "rm -rf"} "${path.join(cwd, "extensions")}"\n` +
+					`poi rilancia \`po start\`.\n`,
+			);
+		}
 	}
 
 	const skillFlags = resolveSkillPaths(packageRoot).flatMap((p) => ["--skill", p]);

@@ -6,6 +6,84 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 34 — `po update` e `po uninstall`
+
+**Richiesta dell'operatore**: un comando per aggiornare l'estensione installata
+nel folder globale all'ultima versione della repo GitHub, e un comando per
+disinstallarla in modo pulito.
+
+**Scoperta di design, prima di scrivere codice**: `po` esiste SOLO come
+pacchetto installato GLOBALMENTE via npm (`npm install -g <percorso o URL>`,
+o `npm link` in sviluppo — mai un secondo meccanismo di installazione). Il
+modo verificabile e onesto di "aggiornare"/"disinstallare" è quindi agire su
+QUEL pacchetto npm globale — leggendo `repository.url` e `name` direttamente
+dal `package.json` del pacchetto in esecuzione (mai hardcoded), così un
+fork/mirror dell'operatore continua a funzionare senza modifiche a questi
+script. **Limite dichiarato esplicitamente in entrambi gli script**: non
+c'è visibilità da questo codebase sul meccanismo interno di `pi extension
+install` — se delega a `npm install -g` dietro le quinte o gestisce un
+registro indipendente non è verificabile qui (stessa incertezza già
+annotata per `pi extension install` che apre una sessione agente, vedi
+sopra in questo stesso documento). Entrambi i comandi istruiscono
+esplicitamente l'operatore a verificare `po --version` dopo l'esecuzione e,
+se il numero non cambia, a reinstallare/disinstallare anche tramite `pi`
+stesso.
+
+**`scripts/update.mjs`** (`runUpdate({packageRoot, argv})`, esposto come
+`po update`):
+- `po update` esegue `npm install -g <repository.url>` (letto dal
+  `package.json` del pacchetto in esecuzione) — npm accetta direttamente un
+  URL HTTPS di GitHub terminante in `.git`, quindi reinstalla sempre
+  dall'ultimo stato del branch di default, senza bisogno di conoscere il
+  numero di versione in anticipo.
+- `po update --check` usa `npm view <url> version` per leggere la versione
+  remota SENZA reinstallare nulla, e la confronta con quella installata
+  localmente — utile per sapere se serve aggiornare prima di farlo
+  davvero.
+- Verifica preventiva di `npm`/`git` sul PATH (npm ha bisogno di git per
+  scaricare da un URL GitHub), messaggio esplicito su permessi elevati
+  (sudo/Amministratore) se l'installazione fallisce per quello.
+- Dopo l'installazione, rilegge la versione dal `package.json` appena
+  scritto per confermare l'esito (npm non fallisce sempre in modo rumoroso
+  su ogni ambiente) e stampa un confronto prima/dopo.
+
+**`scripts/uninstall.mjs`** (`runUninstall({packageRoot, argv})`, esposto
+come `po uninstall`):
+- Chiede conferma interattiva (`node:readline/promises`) prima di eseguire
+  `npm uninstall -g <name>` — evita la disinstallazione accidentale.
+  `--yes`/`-y` salta la conferma (per script/CI).
+- Dichiara esplicitamente cosa NON tocca: i progetti già scaffoldati da
+  `po init` (restano intatti — non sono di proprietà dell'installazione
+  globale), eventuali broker MQTT/container Docker in esecuzione, e la
+  registrazione interna di `pi` se l'installazione originale era via `pi
+  extension install`.
+
+**`bin/po.mjs`**: aggiunti i due nuovi sottocomandi (`update`, `uninstall`),
+entrambi delegano a `await run...()` come gli altri sottocomandi async.
+
+**Verificato con test funzionali reali contro il repo pubblico vero**
+(`https://github.com/alessiobacin/pi-mqtt-orchestrator.git`, non un mock):
+- `po update --check` legge correttamente la versione remota via `npm view`
+  contro l'URL git reale e la confronta con quella locale.
+- `po update` (reinstallazione reale, non simulata) esegue con successo
+  `npm install -g` dall'URL del repo pubblicato, sovrascrivendo
+  correttamente l'installazione precedente (osservato riprendendo il
+  controllo dell'ambiente di sviluppo via `npm link` dopo il test, dato che
+  `po update` aveva legittimamente sostituito quel link con la versione
+  reale pubblicata su GitHub — comportamento corretto, non un bug).
+- `po uninstall --yes` rimuove davvero il pacchetto globale (`po` non è più
+  sul PATH subito dopo); l'invocazione interattiva senza `--yes`,
+  rispondendo "n", annulla correttamente senza toccare nulla.
+- Suite esistente (`check-syntax`, `check-skill-isolation`, `po start
+  --print-only` con e senza `-e` locale) rieseguita dopo il re-link e
+  confermata verde, nessuna regressione.
+
+**Limite onesto**: nessuno dei due comandi è stato testato contro
+un'installazione fatta con `pi extension install` (nessun ambiente con `pi`
+reale disponibile in questa sessione, stesso limite di tutte le revisioni
+precedenti) — solo contro un'installazione via `npm install -g`/`npm link`,
+l'unico percorso verificabile da questo codebase.
+
 ## Revisione 33 — bug reale di doppio caricamento su Windows (tool/flag conflicts), `po doctor`, scaffold semplificato senza `extensions/`
 
 **Trigger**: un test reale dell'operatore su una macchina Windows nuova,

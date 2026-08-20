@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // `po` — CLI unificata di pi-mqtt-orchestrator (Revisione 31, vedi
 // docs/mvp-notes.md). Sostituisce il vecchio binario a sé
-// `pi-orchestrator-init` con tre sottocomandi:
+// `pi-orchestrator-init` con cinque sottocomandi:
 //
 //   po init [opzioni]    scaffolda l'estensione nella directory CORRENTE
 //                        (default — vedi `po init --help`), delega a
@@ -15,6 +15,11 @@
 //                        operativo per ciò che manca (Revisione 33) — delega
 //                        a scripts/doctor.mjs (runDoctor()). Girato anche in
 //                        automatico in coda a `po init`.
+//   po update [--check]  aggiorna l'installazione globale all'ultima
+//                        versione del repo GitHub (Revisione 34) — delega a
+//                        scripts/update.mjs (runUpdate()).
+//   po uninstall [--yes] rimuove l'installazione globale (Revisione 34) —
+//                        delega a scripts/uninstall.mjs (runUninstall()).
 //
 // Installazione: `npm install -g <repo>` (o `npm link` in locale, per lo
 // sviluppo di questo pacchetto stesso) espone `po` sul PATH — campo "bin" di
@@ -33,6 +38,8 @@ import { fileURLToPath } from "node:url";
 import { runCreateProject } from "../scripts/create-project.mjs";
 import { runLaunchPlanner } from "../scripts/launch-planner.mjs";
 import { runDoctor } from "../scripts/doctor.mjs";
+import { runUpdate } from "../scripts/update.mjs";
+import { runUninstall } from "../scripts/uninstall.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -47,6 +54,8 @@ function printTopUsage() {
 			'  init [opzioni]   Scaffolda pi-mqtt-orchestrator nella directory corrente (default) — `po init --help`',
 			"  start [opzioni]  Lancia planner-01 con le skill vendorizzate mattpocock — `po start --help`",
 			"  doctor           Verifica che l'ambiente abbia git/pi/un broker MQTT disponibili",
+			"  update [--check] Aggiorna l'installazione globale all'ultima versione della repo GitHub",
+			"  uninstall [--yes] Rimuove l'installazione globale",
 			"",
 			"  --version, -v    Stampa la versione del pacchetto installato",
 			"  --help, -h       Mostra questo messaggio",
@@ -81,6 +90,14 @@ async function main() {
 	if (sub === "doctor") {
 		const { ok } = await runDoctor({ cwd });
 		process.exit(ok ? 0 : 1);
+	}
+	if (sub === "update") {
+		await runUpdate({ packageRoot, argv: rest });
+		return;
+	}
+	if (sub === "uninstall") {
+		await runUninstall({ packageRoot, argv: rest });
+		return;
 	}
 
 	console.error(`po: comando sconosciuto "${sub}" (vedi \`po --help\`).`);

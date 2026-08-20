@@ -6,6 +6,136 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 36 — `po init --llmp` (config locale llmproxy), conferma del pane-naming automatico via herdr
+
+**Richiesta 1 dell'operatore**: un'opzione di `po init` per scrivere anche la
+configurazione locale di `pi` per un llmproxy, così un progetto scaffoldato è
+pronto a usarlo senza doverla scrivere a mano ogni volta.
+
+**Implementazione** (`scripts/create-project.mjs`): nuovo flag `--llmp`. Se
+passato, scrive `.pi/agent/models.json` e `.pi/agent/settings.json` dentro
+`targetDir` — contenuto FISSO fornito esplicitamente dall'operatore (provider
+`llmproxy`, `baseUrl http://127.0.0.1:7045`, `apiKey "proxy-local"` — un
+segnaposto, non un vero segreto, dato che un proxy in loopback non ne ha
+bisogno davvero; tema `dark`, `defaultProvider`/`defaultModel` entrambi
+`llmproxy`). Il percorso `.pi/agent/` è già coperto da `.gitignore`
+(`.pi/`, aggiunto in Revisione 31) — coerente con quanto osservato in quella
+stessa revisione: un `.pi/` dentro un checkout dell'operatore conteneva
+proprio impostazioni locali di `pi`, incluse credenziali di un proxy LLM.
+Idempotente come il resto dello scaffold: non sovrascrive `models.json`/
+`settings.json` già esistenti a meno di passare anche `--force` (lo stesso
+flag già usato per permettere di scaffoldare in una directory non vuota —
+riusato invece di introdurne uno dedicato, dato che il significato
+"sovrascrivi quello che c'è già" è lo stesso).
+
+**Richiesta 2 dell'operatore**: che la tab herdr del planner, appena lanciata
+con `po start --instance planner-01`, si chiami come l'istanza
+(`planner-01`).
+
+**Nessun codice nuovo necessario — già implementato**: `extensions/orchestrator.ts`
+già calcola `displayName = flags.name || flags.instance` (quindi
+`planner-01` di default, a meno che l'operatore passi esplicitamente
+`--name` per un'etichetta diversa) e, in `session_start`, chiama
+incondizionatamente `herdrRenamePane(displayName)` (oltre a
+`herdrReportAgent()`/`setTerminalTitle()` come fallback ridondanti — vedi il
+commento a quel punto del file). `po start`/`launch-planner.mjs` non
+aggiunge mai un `--name` proprio, quindi questo comportamento di default si
+applica automaticamente a ogni `po start --instance <nome>`. **Condizione
+necessaria, non ovvia**: `herdrRenamePane()` è un no-op se
+`process.env.HERDR_ENV !== "1"` — cioè funziona solo se il terminale da cui
+si lancia `po start` è DAVVERO un pane gestito da herdr (herdr inietta quella
+variabile lui stesso). Se l'operatore apre un terminale/finestra PowerShell
+normale (non creata da herdr) e ci lancia `po start` dentro, non c'è nessun
+pane herdr da rinominare — comportamento corretto, non un bug, dato che in
+quel caso l'istanza semplicemente non sta girando "dentro" herdr.
+
+**Verificato**: `po init --llmp` in una directory scratch scrive
+`models.json`/`settings.json` con il contenuto esatto richiesto; senza
+`--llmp` la cartella `.pi/agent/` non viene creata affatto (nessun falso
+positivo); un secondo `po init --llmp --force` su un file modificato a mano
+lo riporta correttamente al contenuto standard, confermando sia il comporta-
+mento idempotente di default sia l'override esplicito con `--force`.
+`check-syntax`/`check-skill-isolation` rieseguiti, entrambi verdi. La
+richiesta 2 non richiede un test nuovo: è lettura di codice già esistente
+(righe di `session_start` in `extensions/orchestrator.ts`, invariate in
+questa revisione), stesso limite onesto già dichiarato lì (mai verificato
+contro un binario herdr reale in questa sessione).
+
+## Revisione 35 — residuo di `extensions/` locale su progetti pre-Revisione-33, e scoperta reale del percorso di `pi extension install`
+
+**Trigger**: l'operatore ha riportato lo STESSO traceback della Revisione 33
+("Tool ... conflicts with ...", "Flag ... conflicts with ...") su una
+macchina Windows, DOPO aver disinstallato e reinstallato la versione più
+recente del pacchetto. Il comando composto da `po start` includeva ancora
+`-e extensions/orchestrator.ts`, e il traceback mostrava per la prima volta
+con evidenza diretta DUE percorsi distinti in conflitto:
+
+```
+C:\Users\<utente>\.pi\agent\git\github.com\alessiobacin\pi-mqtt-orchestrator\extensions\orchestrator.ts
+C:\Users\<utente>\Desktop\Development\test\extensions\orchestrator.ts
+```
+
+**Causa reale, non un regresso del fix della Revisione 33**: il fix della
+Revisione 33 era corretto per gli scaffold NUOVI (`po init` non copia più
+`extensions/`), ma la directory di progetto `test` dell'operatore era stata
+scaffoldata PRIMA di quella revisione, da una versione di `po init` che
+copiava ancora `extensions/orchestrator.ts` al suo interno. Quel file
+residuo sul disco continua a far scattare `hasLocalExtension` in
+`launch-planner.mjs` esattamente come previsto per il caso "dev mode" — solo
+che qui non è dev mode, è un progetto scaffoldato con un file avanzato da
+prima. Risultato: `po start` compone ancora `-e extensions/orchestrator.ts`,
+che duplica ogni tool/flag contro la copia caricata in automatico da `pi`
+dal SECONDO percorso mostrato sopra.
+
+**Scoperta concreta, non più solo "non verificato"**: quel secondo percorso,
+`~/.pi/agent/git/<host>/<owner>/<repo>/`, è la cartella dove `pi extension
+install <url>` mantiene DAVVERO la propria copia — un clone git separato dal
+pacchetto npm globale, mai documentato pubblicamente da `pi` ma ora
+confermato da un traceback reale (non più solo un'ipotesi, come nella nota
+onesta della Revisione 34). Questo spiega perché `po update`/`po uninstall`
+(Revisione 34), che agivano solo sul pacchetto npm globale, non toccavano
+affatto la copia che `pi` carica davvero per chi ha installato con `pi
+extension install`.
+
+**Fix**:
+
+- `scripts/launch-planner.mjs`: quando `hasLocalExtension` è vero, controlla
+  se il `package.json` della directory corrente ha `name ===
+  "pi-mqtt-orchestrator"` (vero solo dentro il repo del pacchetto stesso, in
+  sviluppo). Se non lo è, stampa un avviso esplicito (non bloccante — non si
+  può escludere un caso legittimo non previsto) che spiega la causa e dà il
+  comando pronto da copiare per risolvere (`rm -rf "<dir>/extensions"` su
+  macOS/Linux, `Remove-Item -Recurse -Force "<dir>\extensions"` su Windows).
+- `scripts/update.mjs`: ora aggiorna ENTRAMBE le copie quando presenti — il
+  pacchetto npm globale (come nella Revisione 34) E, se esiste,
+  `~/.pi/agent/git/<host>/<owner>/<repo>` (dedotto da `repository.url`, mai
+  hardcoded) via `git pull --ff-only`, con conferma prima/dopo tramite
+  `git rev-parse --short HEAD`. `--check` interroga anche quella cartella
+  con `git fetch` + confronto locale/remoto, senza scaricare nulla.
+- `scripts/uninstall.mjs`: ora rileva e (con una conferma interattiva
+  separata, saltabile con `--yes`) rimuove anche quella stessa cartella,
+  con l'avvertenza onesta che potrebbe esistere un registro/manifest
+  separato che `pi` tiene altrove, non ispezionabile da questo codebase.
+
+**Verificato**: nuovo scenario di test funzionale reale — una directory
+scratch con un `extensions/orchestrator.ts` residuo (che simula esattamente
+il caso dell'operatore) fa scattare il nuovo avviso con il comando `rm -rf`
+corretto; il repo del pacchetto stesso (`name === "pi-mqtt-orchestrator"`)
+resta silenzioso, nessun falso positivo. `po update --check` verificato di
+nuovo contro il repo pubblico reale (non un mock): legge correttamente la
+versione remota via `npm view` sull'URL GitHub reale. `check-syntax` e
+`check-skill-isolation` rieseguiti, entrambi verdi.
+
+**Limite onesto**: il percorso `~/.pi/agent/git/<host>/<owner>/<repo>` è
+dedotto dalla struttura osservata in un SINGOLO traceback reale (Windows,
+`pi` v0.84.2) — non è documentato pubblicamente da `pi`, potrebbe cambiare
+in una versione futura senza preavviso, e non è stato verificato su
+macOS/Linux (nessun ambiente con `pi` reale disponibile in questa sessione,
+stesso limite di tutte le revisioni precedenti). Il `git pull --ff-only`
+in `po update` si rifiuta deliberatamente di procedere se quel clone ha
+modifiche locali o storia divergente, invece di forzare — in quel caso resta
+più sicuro reinstallare da capo con `pi extension install <url>`.
+
 ## Revisione 34 — `po update` e `po uninstall`
 
 **Richiesta dell'operatore**: un comando per aggiornare l'estensione installata

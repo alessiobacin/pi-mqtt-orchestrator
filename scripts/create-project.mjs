@@ -68,11 +68,13 @@ function parseArgs(argv) {
 	let name;
 	let target;
 	let force = false;
+	let llmp = false;
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === "--name") name = argv[++i];
 		else if (a === "--target") target = argv[++i];
 		else if (a === "--force") force = true;
+		else if (a === "--llmp") llmp = true;
 		else if (a === "--help" || a === "-h") {
 			printUsage();
 			process.exit(0);
@@ -81,14 +83,14 @@ function parseArgs(argv) {
 			process.exit(1);
 		}
 	}
-	return { name, target, force };
+	return { name, target, force, llmp };
 }
 
 function printUsage() {
 	console.log(
 		[
-			'Uso: po init --name "<Nome Progetto>" [--target <dir>] [--force]',
-			'     (in locale, senza npm install -g: node scripts/create-project.mjs --name "<Nome Progetto>" [--target <dir>] [--force])',
+			'Uso: po init --name "<Nome Progetto>" [--target <dir>] [--force] [--llmp]',
+			'     (in locale, senza npm install -g: node scripts/create-project.mjs --name "<Nome Progetto>" [--target <dir>] [--force] [--llmp])',
 			"",
 			'  --name    Nome del progetto (obbligatorio) — finisce in package.json ("name", slug kebab-case)',
 			"            e viene pre-scritto in .pi/extensions/multiAgentOrchestrator/config/project.json,",
@@ -96,7 +98,11 @@ function printUsage() {
 			"  --target  Directory da scaffoldare (default: la directory CORRENTE, in place). Se passato,",
 			"            scaffolda invece in quella sottocartella/percorso (creandolo se non esiste).",
 			"  --force   Permette di scrivere in una directory di destinazione già esistente e non vuota",
-			"            (una directory che contiene solo \".git\" non conta come non vuota).",
+			"            (una directory che contiene solo \".git\" non conta come non vuota); con --llmp,",
+			"            permette anche di sovrascrivere .pi/agent/models.json e settings.json già esistenti.",
+			"  --llmp    Scrive anche .pi/agent/models.json e .pi/agent/settings.json, configurazione locale",
+			'            di `pi` per un llmproxy su http://127.0.0.1:7045 (provider "llmproxy", tema dark) —',
+			"            utile se usi un proxy LLM locale invece di un provider cloud diretto.",
 		].join("\n"),
 	);
 }
@@ -134,7 +140,7 @@ function copyDir(src, dest) {
 // non più una sottocartella — vedi commento in testa al file); argv sono gli
 // argomenti (senza node/nome-script).
 export async function runCreateProject({ packageRoot, cwd, argv }) {
-	const { name, target, force } = parseArgs(argv);
+	const { name, target, force, llmp } = parseArgs(argv);
 	if (!name) {
 		console.error("create-project: --name è obbligatorio (vedi --help).");
 		process.exit(1);
@@ -205,6 +211,60 @@ export async function runCreateProject({ packageRoot, cwd, argv }) {
 			projectJsonPath,
 			`${JSON.stringify({ schema_version: 1, extension_version: "pre-init", project: name, created_at: nowIso(), updated_at: nowIso() }, null, 2)}\n`,
 		);
+	}
+
+	// 3bis. --llmp (Revisione 36, richiesto dall'operatore): scrive la
+	//    configurazione LOCALE di `pi` per un llmproxy in
+	//    <targetDir>/.pi/agent/{models,settings}.json — `pi` legge un `.pi/`
+	//    project-local in aggiunta a quello globale in home (già osservato in
+	//    Revisione 31: un `.pi/` dentro un checkout dell'operatore conteneva
+	//    proprio impostazioni locali di `pi`, incluse le credenziali del suo
+	//    proxy LLM), quindi questo è lo stesso meccanismo, non un'invenzione.
+	//    Contenuto FISSO, fornito esplicitamente dall'operatore — non generato:
+	//    provider "llmproxy" su http://127.0.0.1:7045 con una apiKey segnaposto
+	//    ("proxy-local", non un vero segreto — un proxy locale in loopback non
+	//    ne ha bisogno, il valore serve solo perché `pi` si aspetta il campo).
+	//    Idempotente come il resto dello scaffold: non sovrascrive file già
+	//    esistenti a meno di --force (evita di disfare una configurazione che
+	//    l'operatore ha già personalizzato a mano).
+	if (llmp) {
+		const agentDir = path.join(targetDir, ".pi", "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+
+		const modelsPath = path.join(agentDir, "models.json");
+		const settingsPath = path.join(agentDir, "settings.json");
+		const modelsContent = {
+			providers: {
+				llmproxy: {
+					api: "anthropic-messages",
+					baseUrl: "http://127.0.0.1:7045",
+					apiKey: "proxy-local",
+					models: [{ id: "llmproxy", name: "llmProxy", contextWindow: 1000000 }],
+				},
+			},
+		};
+		const settingsContent = {
+			theme: "dark",
+			defaultProvider: "llmproxy",
+			defaultModel: "llmproxy",
+		};
+
+		const skipped = [];
+		if (force || !fs.existsSync(modelsPath)) {
+			fs.writeFileSync(modelsPath, `${JSON.stringify(modelsContent, null, 2)}\n`);
+		} else {
+			skipped.push(modelsPath);
+		}
+		if (force || !fs.existsSync(settingsPath)) {
+			fs.writeFileSync(settingsPath, `${JSON.stringify(settingsContent, null, 2)}\n`);
+		} else {
+			skipped.push(settingsPath);
+		}
+
+		console.log(`create-project: --llmp — configurazione pi/llmproxy scritta in ${agentDir}`);
+		if (skipped.length > 0) {
+			console.log(`create-project: (già presenti, non sovrascritti: ${skipped.join(", ")} — usa --force per sovrascriverli)`);
+		}
 	}
 
 	// 4. .gitignore minimo (worktree/node_modules/logs), git init se non è

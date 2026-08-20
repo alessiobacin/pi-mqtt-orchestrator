@@ -19,7 +19,7 @@ Everything communicates over a local MQTT broker, using role/instance identity a
 - **A watchdog** that detects stalled tickets and automatically escalates them
 - **Phased execution plans** — the planner declares which roles work together and in what order, and the system enforces it
 - **WhatsApp notifications** (via Evolution API) when a task completes or needs your input, so you don't have to watch the terminal
-- **A global `po` CLI** (`po init`, `po start`) for scaffolding and launching new orchestrated projects
+- **A global `po` CLI** (`po init`, `po start`, `po doctor`, `po update`, `po uninstall`) for scaffolding, launching, verifying the environment, and keeping new orchestrated projects up to date
 - **Cross-platform** — macOS, Linux, and Windows
 
 ## Installation
@@ -45,7 +45,6 @@ npm install -g .
 
 mkdir url-shortener; cd url-shortener
 po init --name "URL Shortener"
-npm install
 copy .env.example .env   # optional: WhatsApp notifications
 
 # MQTT broker — either works:
@@ -57,7 +56,23 @@ docker compose -f mqtt/compose.yaml up -d   # with Docker Desktop
 po start --instance planner-01
 ```
 
-`po init` detects your OS automatically and prints the right commands either way.
+`po init` detects your OS automatically and prints the right commands either way, and finishes by running `po doctor` for you — a quick check that git, `pi`, and an MQTT broker are all available, with OS-specific install hints for anything that's missing. Run it again any time with `po doctor`.
+
+### Keeping `po` up to date
+
+```bash
+po update           # reinstall the global package from the latest GitHub main
+po update --check   # just check whether an update is available, without installing
+po uninstall        # remove the global installation (asks for confirmation; add --yes to skip it)
+```
+
+`po update` updates both places the extension can live: the global npm package (`npm install -g` against this repo's GitHub URL) and, if present, the separate clone `pi extension install` keeps under `~/.pi/agent/git/github.com/<owner>/<repo>` (a plain `git pull`). `po uninstall` removes both the same way, asking a separate confirmation for the second one.
+
+**If you scaffolded a project with an older `po init`** (one that still copied `extensions/` into new projects), that project directory may have its own leftover `extensions/orchestrator.ts`. `po start` will warn you if it finds one outside this package's own repo — delete that folder (`rm -rf extensions` / `Remove-Item -Recurse -Force extensions`) and re-run `po start`; it's no longer needed once the extension is installed globally.
+
+### Optional: local llmproxy config
+
+If you run `pi` against a local LLM proxy instead of a cloud provider directly, `po init --llmp` also writes `.pi/agent/models.json` and `.pi/agent/settings.json` in the scaffolded project, pre-configured for a proxy listening on `http://127.0.0.1:7045` (provider `llmproxy`, dark theme). It won't overwrite either file if it already exists — pass `--force` too if you want to reset them back to these defaults.
 
 ## Quickstart
 
@@ -66,7 +81,6 @@ Scaffold a new project and start the planner:
 ```bash
 mkdir url-shortener && cd url-shortener
 po init --name "URL Shortener"
-npm install
 cp .env.example .env   # optional: WhatsApp notifications, fill in your Evolution API details
 docker compose -f mqtt/compose.yaml up -d   # local MQTT broker
 po start --instance planner-01
@@ -80,10 +94,10 @@ Build a URL shortener with a REST API and a SQLite backend.
 
 The planner will scope the task, propose a team and an execution plan, and — once you confirm — launch the other agents and get to work. Coder implements inside an isolated worktree; reviewer checks the result; the planner merges it into your main branch once it's approved, and reports back.
 
-Other roles (coder, reviewer, and any specialist) are launched the same way, directly with the `pi` CLI once you know their instance name:
+Other roles (coder, reviewer, and any specialist) are launched the same way, directly with the `pi` CLI once you know their instance name — no `-e` flag needed, since the extension auto-loads once installed:
 
 ```bash
-pi -e extensions/orchestrator.ts --instance coder-01 --role coder
+pi --instance coder-01 --role coder
 ```
 
 ## Configuration
@@ -106,7 +120,7 @@ extensions/orchestrator.ts   the Pi extension itself — identity, MQTT, tools, 
 prompts/                     system prompt for each role (planner, coder, reviewer, specialists)
 agents/roles.yaml            per-role defaults and the specialist roster
 agents/agents.yaml            example instance configuration
-bin/po.mjs                   the `po` CLI (init/start)
+bin/po.mjs                   the `po` CLI (init/start/doctor/update/uninstall)
 scripts/                     CLI internals, dev tooling, and CI checks
 skills-vendor/mattpocock/    vendored planner-only skills (wayfinder, to-spec) — see VERSION.md
 mqtt/                        local Mosquitto broker config for development

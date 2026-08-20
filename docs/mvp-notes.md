@@ -6,6 +6,98 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 33 — bug reale di doppio caricamento su Windows (tool/flag conflicts), `po doctor`, scaffold semplificato senza `extensions/`
+
+**Trigger**: un test reale dell'operatore su una macchina Windows nuova,
+dopo aver installato l'estensione globalmente con `pi extension install` e
+scaffoldato un progetto con `po init`. `po start --instance planner-01` ha
+composto (come atteso, prima di questa revisione):
+
+```
+pi -e extensions/orchestrator.ts --instance planner-01 --role planner --skill C:\Users\...\wayfinder --skill ...\to-spec --skill ...\grilling --skill ...\domain-modeling --skill ...\setup-matt-pocock-skills
+```
+
+fallendo con circa 30 righe del tipo:
+
+```
+Error: Failed to load extension ...
+Tool <nome> conflicts with C:\Users\alessiobacin.DESKTOP-RLE36PF\Desktop\Development\test\extensions\orchestrator.ts
+Flag --instance conflicts with ...
+Hint: Start without extensions using 'pi -ne'.
+```
+
+L'operatore ha poi lanciato, per verificare, il comando bare `pi --instance
+planner-01` (nessun `-e`, nessun `--role`, nessun `--skill`) — funzionato
+perfettamente:
+
+```
+pi v0.84.2 ... [Extensions] orchestrator.ts ...
+orchestrator connesso · planner-01 (planner) · broker mqtt://localhost:1883
+```
+
+**Root cause, confermata da questo test**: una volta installata come vera
+estensione Pi (`pi extension install <url>`), `pi` carica il codice
+dell'estensione IN AUTOMATICO in ogni sessione, da qualunque directory —
+non serve mai più passare `-e extensions/orchestrator.ts` a mano. Ma
+`create-project.mjs` (fino alla Revisione 32) copiava comunque una seconda
+copia del codice dentro ogni progetto scaffoldato, e `launch-planner.mjs`
+la caricava esplicitamente con `-e`. Risultato: lo stesso tool/flag veniva
+registrato due volte (una dall'auto-load globale, una dal caricamento
+esplicito locale) e `pi` rifiutava ogni singolo tool/flag come duplicato.
+Confermato leggendo `loadConfig()`/`loadRolePrompt()` in
+`extensions/orchestrator.ts`: risolvono sempre `configDir`/`promptsDir`
+relativi a `identity.cwd`/`process.cwd()`, MAI al percorso del modulo
+stesso — quindi un progetto scaffoldato non ha mai avuto bisogno di una sua
+copia del CODICE, solo della sua CONFIGURAZIONE (agents/roles.yaml,
+prompts/*.md, mqtt/, .env).
+
+**Fix**:
+
+- `scripts/create-project.mjs` non copia più `extensions/` (né
+  `check-syntax.mjs`) in un progetto scaffoldato. Il `package.json`
+  generato è ora minimale (solo identità/metadata: `name`, `version`,
+  `private`, `type`, `description`) — niente più `pi.extensions`, niente
+  script `check-syntax`, niente `dependencies`/`devDependencies`: il codice
+  dell'estensione e le sue dipendenze npm (`mqtt`, `yaml`, ecc.) vivono solo
+  nel pacchetto installato globalmente. `npm install` non è più un passo
+  necessario dopo `po init`.
+- `scripts/launch-planner.mjs` (`runLaunchPlanner()`) non richiede più
+  l'esistenza di `<cwd>/extensions/orchestrator.ts` per partire: se quel
+  file esiste (dev mode dentro questo stesso repo, o un progetto legacy
+  pre-Revisione-33 con ancora una copia locale) compone il comando CON `-e
+  extensions/orchestrator.ts`, come prima; altrimenti lo compone SENZA `-e`,
+  confidando sull'auto-load globale. La verifica "è un progetto
+  inizializzato" (prima basata sull'esistenza di quel file) ora controlla
+  invece `agents/roles.yaml` oppure
+  `.pi/extensions/multiAgentOrchestrator/config/project.json` (marker che
+  `po init` scrive sempre), con l'esistenza locale di
+  `extensions/orchestrator.ts` come terzo criterio valido.
+- **`po doctor`** (nuovo sottocomando, `scripts/doctor.mjs`,
+  `runDoctor({cwd})`): richiesto esplicitamente dall'operatore insieme al
+  fix sopra — verifica che l'ambiente abbia git, `pi` (senza pretendere di
+  installarlo: questo pacchetto non ne gestisce l'installazione, solo
+  segnala che manca), e un modo di far girare un broker MQTT (broker già
+  raggiungibile su 127.0.0.1:1883, oppure Docker con il daemon attivo,
+  oppure Mosquitto nativo sul PATH) — con istruzioni di installazione
+  specifiche per `process.platform` (darwin/win32/linux, via
+  brew/winget/apt) per qualunque cosa manchi. Gira automaticamente in coda a
+  `po init`, ed è invocabile a sé con `po doctor`.
+- `bin/po.mjs`: aggiunto il terzo sottocomando `doctor`; `main()` è ora
+  `async` (necessario perché `runCreateProject()` e `runDoctor()` sono
+  entrambe `async`).
+- Verificato con test funzionali reali in questa sessione: `po init` in una
+  directory scratch non scaffolda più `extensions/`, il `package.json`
+  generato è minimale, `po doctor` gira in automatico alla fine; `po start
+  --print-only` nella stessa directory compone il comando SENZA `-e`;
+  `po start --print-only` dentro questo stesso repo del pacchetto (dove
+  `extensions/orchestrator.ts` esiste davvero) compone il comando CON `-e`,
+  come prima. `npm run check-syntax` e `npm run check-skill-isolation`
+  passano entrambi senza modifiche.
+- `README.md` aggiornato di conseguenza: rimosso il passo `npm install` dal
+  Quickstart e dalla sezione Windows (non più necessario), menzionato `po
+  doctor`, e l'esempio di lancio di un ruolo diverso da planner non passa
+  più `-e extensions/orchestrator.ts` a mano.
+
 ## Revisione 32 — installazione/uso su Windows (auto-discovery del sistema operativo)
 
 **Richiesta dell'operatore**: aggiungere supporto Windows, con

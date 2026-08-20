@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // `po` — CLI unificata di pi-mqtt-orchestrator (Revisione 31, vedi
 // docs/mvp-notes.md). Sostituisce il vecchio binario a sé
-// `pi-orchestrator-init` con due sottocomandi:
+// `pi-orchestrator-init` con tre sottocomandi:
 //
 //   po init [opzioni]    scaffolda l'estensione nella directory CORRENTE
 //                        (default — vedi `po init --help`), delega a
@@ -9,6 +9,12 @@
 //   po start [opzioni]   lancia planner-01 componendo i flag --skill per le
 //                        skill vendorizzate mattpocock, delega a
 //                        scripts/launch-planner.mjs (runLaunchPlanner()).
+//   po doctor            verifica che l'ambiente abbia tutto il necessario
+//                        (git, `pi`, un broker MQTT disponibile) e stampa
+//                        istruzioni di installazione per il tuo sistema
+//                        operativo per ciò che manca (Revisione 33) — delega
+//                        a scripts/doctor.mjs (runDoctor()). Girato anche in
+//                        automatico in coda a `po init`.
 //
 // Installazione: `npm install -g <repo>` (o `npm link` in locale, per lo
 // sviluppo di questo pacchetto stesso) espone `po` sul PATH — campo "bin" di
@@ -26,6 +32,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { runCreateProject } from "../scripts/create-project.mjs";
 import { runLaunchPlanner } from "../scripts/launch-planner.mjs";
+import { runDoctor } from "../scripts/doctor.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -39,6 +46,7 @@ function printTopUsage() {
 			"Comandi:",
 			'  init [opzioni]   Scaffolda pi-mqtt-orchestrator nella directory corrente (default) — `po init --help`',
 			"  start [opzioni]  Lancia planner-01 con le skill vendorizzate mattpocock — `po start --help`",
+			"  doctor           Verifica che l'ambiente abbia git/pi/un broker MQTT disponibili",
 			"",
 			"  --version, -v    Stampa la versione del pacchetto installato",
 			"  --help, -h       Mostra questo messaggio",
@@ -46,7 +54,7 @@ function printTopUsage() {
 	);
 }
 
-function main() {
+async function main() {
 	const [sub, ...rest] = process.argv.slice(2);
 
 	if (!sub) {
@@ -63,16 +71,23 @@ function main() {
 		process.exit(0);
 	}
 	if (sub === "init") {
-		runCreateProject({ packageRoot, cwd, argv: rest });
+		await runCreateProject({ packageRoot, cwd, argv: rest });
 		return;
 	}
 	if (sub === "start") {
 		runLaunchPlanner({ packageRoot, cwd, argv: rest });
 		return;
 	}
+	if (sub === "doctor") {
+		const { ok } = await runDoctor({ cwd });
+		process.exit(ok ? 0 : 1);
+	}
 
 	console.error(`po: comando sconosciuto "${sub}" (vedi \`po --help\`).`);
 	process.exit(1);
 }
 
-main();
+main().catch((err) => {
+	console.error(`po: errore inatteso — ${err instanceof Error ? err.stack || err.message : String(err)}`);
+	process.exit(1);
+});

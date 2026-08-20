@@ -1,9 +1,26 @@
 #!/usr/bin/env node
 // Scaffolda un nuovo progetto "vuoto" pronto per pi-mqtt-orchestrator, in una
-// directory a scelta — copia extensions/agents/prompts/mqtt/.env.example da
-// QUESTO pacchetto e scrive un package.json NUOVO, specifico del progetto
-// (mai il package.json del pacchetto stesso), inizializza un repo git (serve
-// per l'isolamento in worktree, vedi docs/mvp-notes.md Revisioni 13/14).
+// directory a scelta — copia agents/prompts/mqtt/.env.example da QUESTO
+// pacchetto e scrive un package.json NUOVO, specifico del progetto (mai
+// quello del pacchetto), inizializza un repo git (serve per l'isolamento in
+// worktree, vedi docs/mvp-notes.md Revisioni 13/14).
+//
+// Revisione 33 — NON copia più extensions/: da quando l'estensione si
+// installa globalmente (`pi extension install`, Revisione 31), `pi` la
+// carica automaticamente in OGNI sessione, ovunque — copiarne anche un
+// secondo esemplare nel progetto scaffoldato e caricarlo esplicitamente con
+// `-e extensions/orchestrator.ts` (come faceva `po start` prima di questa
+// revisione) causa un doppio caricamento: stessi tool/flag registrati due
+// volte, `pi` si rifiuta con "Tool ... conflicts with ...". Scoperto da un
+// test reale dell'operatore su una macchina Windows nuova — vedi Revisione
+// 33 in docs/mvp-notes.md per il traceback completo e l'analisi. Un
+// progetto scaffoldato ora contiene solo CONFIGURAZIONE
+// (agents/roles.yaml, prompts/*.md, mqtt/, .env.example), mai il codice
+// dell'estensione: `pi`/`configDir`/`promptsDir` la risolvono comunque
+// relativa alla cwd del progetto, indipendentemente da dove il CODICE
+// dell'estensione è stato caricato (verificato leggendo loadConfig()/
+// loadRolePrompt() in extensions/orchestrator.ts: usano sempre
+// `identity.cwd`, mai il percorso del modulo stesso).
 //
 // PERCHÉ QUESTO SCRIPT ESISTE INVECE DI UN VERO SUBCOMMAND `pi orchestrator
 // init` (richiesta dell'operatore, Revisione 28): non esiste, in questo
@@ -45,6 +62,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runDoctor } from "./doctor.mjs";
 
 function parseArgs(argv) {
 	let name;
@@ -115,7 +133,7 @@ function copyDir(src, dest) {
 // directory dell'operatore (default per --target, Revisione 31: in place,
 // non più una sottocartella — vedi commento in testa al file); argv sono gli
 // argomenti (senza node/nome-script).
-export function runCreateProject({ packageRoot, cwd, argv }) {
+export async function runCreateProject({ packageRoot, cwd, argv }) {
 	const { name, target, force } = parseArgs(argv);
 	if (!name) {
 		console.error("create-project: --name è obbligatorio (vedi --help).");
@@ -140,47 +158,34 @@ export function runCreateProject({ packageRoot, cwd, argv }) {
 
 	console.log(`create-project: creo il progetto "${name}" in ${targetDir}${inPlace ? " (in place)" : ""}`);
 
-	// 1. Copia extensions/agents/prompts/mqtt dal pacchetto — MAI il
-	//    package.json del pacchetto stesso (motivo per cui questo script
-	//    esiste: evitare che un progetto nuovo erediti l'identità/il nome
-	//    del pacchetto invece del proprio, il problema reale osservato in
-	//    moa-test-project — vedi docs/mvp-notes.md, Revisione 28).
-	for (const dir of ["extensions", "agents", "prompts", "mqtt"]) {
+	// 1. Copia SOLO configurazione (agents/prompts/mqtt) dal pacchetto — MAI
+	//    extensions/ (Revisione 33, vedi commento in testa al file: il codice
+	//    dell'estensione vive nel pacchetto installato globalmente, `pi` lo
+	//    carica da lì in automatico) e MAI il package.json del pacchetto
+	//    stesso (motivo per cui questo script esiste: evitare che un
+	//    progetto nuovo erediti l'identità/il nome del pacchetto invece del
+	//    proprio, il problema reale osservato in moa-test-project — vedi
+	//    docs/mvp-notes.md, Revisione 28).
+	for (const dir of ["agents", "prompts", "mqtt"]) {
 		const src = path.join(packageRoot, dir);
 		if (fs.existsSync(src)) copyDir(src, path.join(targetDir, dir));
 	}
 	const envExample = path.join(packageRoot, ".env.example");
 	if (fs.existsSync(envExample)) fs.copyFileSync(envExample, path.join(targetDir, ".env.example"));
-	// check-syntax.mjs è l'unico script del pacchetto copiato per default:
-	// autosufficiente (nessuna dipendenza dalle skill vendorizzate di mattpocock né da
-	// altri script), e utile per chiunque poi tocchi extensions/orchestrator.ts
-	// nel progetto scaffoldato.
-	const checkSyntaxSrc = path.join(packageRoot, "scripts", "check-syntax.mjs");
-	const hasCheckSyntax = fs.existsSync(checkSyntaxSrc);
-	if (hasCheckSyntax) {
-		fs.mkdirSync(path.join(targetDir, "scripts"), { recursive: true });
-		fs.copyFileSync(checkSyntaxSrc, path.join(targetDir, "scripts", "check-syntax.mjs"));
-	}
 
-	// 2. package.json NUOVO, specifico del progetto — legge dependencies/
-	//    devDependencies dal pacchetto sorgente così restano sincronizzate
-	//    senza doverle duplicare a mano in questo script, ma name/
-	//    description/version sono del progetto, non del pacchetto.
-	const sourcePkg = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf-8"));
+	// 2. package.json NUOVO, minimo, specifico del progetto — solo
+	//    identità/metadata (Revisione 33: nessuna dipendenza da installare
+	//    per far girare l'estensione, dato che il codice e le sue
+	//    dipendenze npm vivono nell'installazione globale del pacchetto, non
+	//    qui — `npm install` non è più un passo necessario in un progetto
+	//    scaffoldato di default).
 	const projectPkg = {
 		name: slug,
 		version: "0.1.0",
 		private: true,
 		type: "module",
 		description: `Progetto "${name}", orchestrato con pi-mqtt-orchestrator.`,
-		pi: { extensions: ["./extensions"] },
-		scripts: {
-			"check-syntax": "node --experimental-strip-types scripts/check-syntax.mjs extensions/orchestrator.ts",
-		},
-		dependencies: sourcePkg.dependencies || {},
-		devDependencies: sourcePkg.devDependencies || {},
 	};
-	if (!hasCheckSyntax) delete projectPkg.scripts["check-syntax"];
 	fs.writeFileSync(path.join(targetDir, "package.json"), `${JSON.stringify(projectPkg, null, 2)}\n`);
 
 	// 3. Pre-scrivi config/project.json con il nome scelto — così il primo
@@ -232,16 +237,23 @@ export function runCreateProject({ packageRoot, cwd, argv }) {
 	const isWindows = process.platform === "win32";
 	const copyEnvCmd = isWindows ? "copy .env.example .env" : "cp .env.example .env";
 
+	// Doctor automatico (Revisione 33, richiesto dall'operatore): controlla
+	// che l'ambiente abbia tutto il necessario (git, `pi`, un modo per far
+	// girare un broker MQTT) PRIMA di elencare i prossimi passi, con
+	// istruzioni di installazione specifiche per il sistema operativo per
+	// qualunque cosa manchi — vedi scripts/doctor.mjs.
+	console.log("");
+	await runDoctor({ cwd: targetDir });
+
 	console.log("");
 	console.log(`Fatto. Prossimi passi${inPlace ? "" : ` (cd ${targetDir})`}:`);
-	console.log("  npm install");
 	console.log(`  ${copyEnvCmd}   # facoltativo, per la notifica WhatsApp di fine task`);
 	console.log("  docker compose -f mqtt/compose.yaml up -d   # broker MQTT locale (Docker Desktop su Windows), oppure punta --broker a uno esistente");
 	if (isWindows) {
 		console.log("  # senza Docker Desktop: installa Mosquitto nativo (https://mosquitto.org/download/ o `winget install EclipseFoundation.Mosquitto`)");
 		console.log("  #   poi: mosquitto -c mqtt\\mosquitto.conf   (in una finestra PowerShell separata)");
 	}
-	console.log("  po start --instance planner-01   # oppure: pi -e extensions/orchestrator.ts --instance planner-01 --role planner");
+	console.log("  po start --instance planner-01");
 	console.log("");
 	console.log("Nota: questo scaffold NON include la cartella delle skill vendorizzate di mattpocock (le skill Wayfinder/To-Spec");
 	console.log("sono un extra pesante, non necessario per iniziare) — `po start` le include comunque dall'installazione globale");

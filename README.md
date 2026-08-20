@@ -1,6 +1,9 @@
 # pi-mqtt-orchestrator
 
-A multi-agent orchestration extension for [Pi Agent](https://github.com/earendil-works/pi). It coordinates a **planner**, a **coder**, a **reviewer**, and an optional roster of specialist agents over MQTT 5, isolates every unit of work in its own git worktree, tracks execution through a persistent ticket/DAG layer, and can notify you over WhatsApp when something finishes or needs your attention.
+[![CI](https://github.com/alessiobacin/pi-mqtt-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/alessiobacin/pi-mqtt-orchestrator/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+A multi-agent orchestration extension for [Pi](https://github.com/badlogic/pi-mono). It coordinates a **planner**, a **coder**, a **reviewer**, and an optional roster of specialist agents over MQTT 5, isolates every unit of work in its own git worktree, tracks execution through a persistent ticket/DAG layer, and can notify you over WhatsApp when something finishes or needs your attention.
 
 ## Overview
 

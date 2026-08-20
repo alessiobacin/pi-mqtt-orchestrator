@@ -102,22 +102,52 @@ function parseArgs(argv) {
 // skill vendorizzate (vivono SOLO nel pacchetto, mai copiate in un progetto
 // scaffoldato — vedi create-project.mjs); cwd è la directory del progetto
 // dell'operatore, usata sia come cwd del processo `pi` spawnato sia per
-// verificare che ci sia davvero un extensions/orchestrator.ts da caricare
-// (altrimenti l'errore di `pi` stesso sarebbe criptico — Revisione 31).
+// verificare che sia davvero un progetto inizializzato.
+//
+// Revisione 33 — niente più `-e extensions/orchestrator.ts` di default:
+// da quando l'estensione si installa globalmente (`pi extension install`),
+// `pi` la carica in automatico in OGNI sessione, ovunque (verificato da un
+// test reale dell'operatore su Windows: `pi --instance planner-01`, senza
+// alcun `-e`, si connette correttamente). Un progetto scaffoldato da `po
+// init` non contiene più una copia locale di extensions/orchestrator.ts
+// (vedi create-project.mjs) — comporre comunque il comando con
+// `-e extensions/orchestrator.ts` in quel caso caricava lo stesso codice
+// due volte (quello globale auto-caricato + quello esplicito locale), e
+// `pi` rifiutava ogni tool/flag duplicato ("Tool ... conflicts with ...",
+// "Flag ... conflicts with ...") — esattamente il traceback riportato
+// dall'operatore. Fix: passa `-e extensions/orchestrator.ts` SOLO se quel
+// file esiste davvero in cwd (dev mode dentro questo stesso repo, o un
+// progetto legacy pre-Revisione-33 con ancora una copia locale); altrimenti
+// confida nell'auto-load globale e non passa `-e` affatto. La verifica "è
+// un progetto inizializzato" non può quindi più dipendere dall'esistenza di
+// extensions/orchestrator.ts (Revisione 31) — usa invece i marker che
+// `po init` scrive sempre: agents/roles.yaml oppure
+// .pi/extensions/multiAgentOrchestrator/config/project.json.
 export function runLaunchPlanner({ packageRoot, cwd, argv }) {
 	const { passthrough, printOnly } = parseArgs(argv);
 
 	const orchestratorPath = path.join(cwd, "extensions", "orchestrator.ts");
-	if (!existsSync(orchestratorPath)) {
+	const hasLocalExtension = existsSync(orchestratorPath);
+	const projectMarkers = [
+		path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", "config", "project.json"),
+		path.join(cwd, "agents", "roles.yaml"),
+	];
+	const looksInitialized = hasLocalExtension || projectMarkers.some((p) => existsSync(p));
+	if (!looksInitialized) {
 		console.error(
-			`launch-planner: "${orchestratorPath}" non esiste — questa directory non sembra un progetto pi-mqtt-orchestrator inizializzato.\n` +
+			`launch-planner: questa directory non sembra un progetto pi-mqtt-orchestrator inizializzato ` +
+				`(nessun agents/roles.yaml, nessun .pi/extensions/multiAgentOrchestrator/config/project.json, ` +
+				`nessun extensions/orchestrator.ts locale).\n` +
 				`Esegui prima \`po init --name "<nome progetto>"\` (o \`node scripts/create-project.mjs ...\` in locale), poi rilancia da lì.`,
 		);
 		process.exit(1);
 	}
 
 	const skillFlags = resolveSkillPaths(packageRoot).flatMap((p) => ["--skill", p]);
-	const piArgs = ["-e", "extensions/orchestrator.ts", ...passthrough, "--role", "planner", ...skillFlags];
+	// -e esplicito solo se c'è davvero una copia locale (dev mode / progetto
+	// legacy) — altrimenti l'estensione installata globalmente basta da sola.
+	const extensionFlags = hasLocalExtension ? ["-e", "extensions/orchestrator.ts"] : [];
+	const piArgs = [...extensionFlags, ...passthrough, "--role", "planner", ...skillFlags];
 
 	const printable = ["pi", ...piArgs].map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");
 	console.log(`launch-planner: comando composto (cwd ${cwd}):\n  ${printable}\n`);

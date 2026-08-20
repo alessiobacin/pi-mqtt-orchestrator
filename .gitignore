@@ -1,0 +1,14 @@
+# pi-mqtt-orchestrator: per-task git worktrees (see docs/mvp-notes.md)
+.worktrees/
+# pi-mqtt-orchestrator: per-instance debug event logs, diagnostic only (see docs/mvp-notes.md, Revisione 18)
+logs/
+node_modules/
+# real secrets — NEVER commit (see docs/mvp-notes.md, Revisione 31: a real Evolution API
+# key + phone number were found committed in a sibling deployment's .env; this repo's
+# history starts clean specifically to avoid repeating that mistake)
+.env
+# SQLite ticket/DAG storage + runtime data dirs, per-project/per-machine, never shared (Revisione 26+)
+*.db
+*.db-journal
+.pi/
+.DS_Store

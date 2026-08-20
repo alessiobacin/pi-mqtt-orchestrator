@@ -1,0 +1,43 @@
+# Agent instances — architecture.md §2. Each key is what you pass as --instance.
+# Fields override/extend the matching role in roles.yaml (INSTANCE > ROLE precedence).
+
+agents:
+  planner-01:
+    role: planner
+
+  coder-01:
+    role: coder
+    skills:
+      - typescript
+      - angular
+    cli:
+      - docker
+    teams:
+      - core
+      - frontend
+
+  coder-02:
+    role: coder
+    model:
+      provider: llmproxy
+      model: deepseek-v4
+    skills:
+      - backend-development
+      - mongodb
+    teams:
+      - core
+      - backend
+
+  reviewer-01:
+    role: reviewer
+
+  reviewer-security-01:
+    role: reviewer
+    inherit_role_tools: true
+    model:
+      provider: llmproxy
+      model: premium-reasoning-model
+    skills:
+      - security-review
+    cli:
+      - semgrep

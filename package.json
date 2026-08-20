@@ -1,0 +1,35 @@
+{
+  "name": "pi-mqtt-orchestrator",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MQTT-based multi-agent orchestration extension for Pi (planner/coder/reviewer + a ticket/DAG layer), with a global `po` CLI (po init / po start) for scaffolding and launching new orchestrated projects.",
+  "homepage": "https://github.com/alessiobacin/pi-mqtt-orchestrator",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alessiobacin/pi-mqtt-orchestrator.git"
+  },
+  "license": "MIT",
+  "keywords": ["pi-package", "pi-agent", "multi-agent", "mqtt", "orchestrator"],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "bin": {
+    "po": "./bin/po.mjs"
+  },
+  "scripts": {
+    "check-syntax": "node --experimental-strip-types scripts/check-syntax.mjs extensions/orchestrator.ts",
+    "review-log": "node scripts/review-log.mjs",
+    "launch-planner": "node scripts/launch-planner.mjs",
+    "check-skill-isolation": "node scripts/check-skill-isolation.mjs",
+    "create-project": "node scripts/create-project.mjs",
+    "setup-dev-stubs": "node scripts/setup-dev-stubs.mjs"
+  },
+  "dependencies": {
+    "mqtt": "^5",
+    "yaml": "^2.8.0"
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "^0.34.52"
+  }
+}

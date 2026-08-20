@@ -1,0 +1,84 @@
+name: CI
+
+# Esegue la suite di verifica reale di questo repo (non solo lint/build) a
+# ogni push/PR — richiesto dall'operatore prima di rendere pubblico questo
+# repo (vedi docs/mvp-notes.md, Revisione 31). Nessuno di questi step
+# richiede la CLI `pi` reale: check-syntax.mjs e tutti gli
+# script/smoke-test-*.mjs + e2e-full-flow.mjs sono pensati apposta per
+# essere eseguibili con solo Node, un broker MQTT locale, e (per gli script
+# che importano/eseguono per davvero extensions/orchestrator.ts) lo stub
+# locale di @mariozechner/pi-tui — vedi scripts/setup-dev-stubs.mjs.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Recreate local @mariozechner/pi-tui stub (dev/test only — see scripts/setup-dev-stubs.mjs)
+        run: npm run setup-dev-stubs
+
+      - name: Install and start a local mosquitto broker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mosquitto
+          nohup mosquitto -c mqtt/mosquitto.conf > /tmp/mosquitto.log 2>&1 &
+          disown
+          for i in $(seq 1 20); do
+            (echo > /dev/tcp/127.0.0.1/1883) >/dev/null 2>&1 && echo "mosquitto up" && exit 0
+            sleep 0.5
+          done
+          echo "mosquitto never came up"; cat /tmp/mosquitto.log; exit 1
+
+      - name: check-syntax (real syntax check of extensions/orchestrator.ts)
+        run: npm run check-syntax
+
+      - name: check-skill-isolation (mattpocock skills wired ONLY to planner)
+        run: npm run check-skill-isolation
+
+      - name: Smoke tests (transport / pipeline / worktree / coordination / etc.)
+        run: |
+          node scripts/smoke-test.mjs
+          node scripts/smoke-test-pipeline.mjs
+          node scripts/smoke-test-multiround.mjs
+          node scripts/smoke-test-worktree.mjs
+          node scripts/smoke-test-specialist-prompt.mjs
+          node scripts/smoke-test-coordination.mjs
+          node scripts/smoke-test-debug-log.mjs
+          node scripts/smoke-test-late-broker.mjs
+          node scripts/smoke-test-shutdown-hang.mjs
+          node scripts/smoke-test-report-audit.mjs
+          node scripts/smoke-test-whatsapp-notify.mjs
+          node scripts/smoke-test-plan-gate.mjs
+
+      - name: Real e2e tests (import and execute the REAL extensions/orchestrator.ts)
+        run: |
+          node --experimental-strip-types scripts/smoke-test-watchdog.mjs
+          node --experimental-strip-types scripts/smoke-test-response-wakeup.mjs
+          node --experimental-strip-types scripts/smoke-test-worktree-cwd-guard.mjs
+          node --experimental-strip-types scripts/smoke-test-ticket-engine.mjs
+          node --experimental-strip-types scripts/e2e-full-flow.mjs
+
+      - name: po CLI smoke test (init in place + start --print-only, via a real global install)
+        run: |
+          npm install -g .
+          mkdir -p /tmp/po-ci-test && cd /tmp/po-ci-test
+          po init --name "CI Test Project"
+          test -f extensions/orchestrator.ts
+          po start --instance planner-01 --print-only | grep -q -- "--role planner"

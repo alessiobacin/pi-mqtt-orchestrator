@@ -1,0 +1,11 @@
+# Local development broker only. Binds to 127.0.0.1 — not reachable from the
+# network. Run with: docker compose -f mqtt/compose.yaml up
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: pi-orchestrator-mqtt-dev
+    ports:
+      - "127.0.0.1:1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped

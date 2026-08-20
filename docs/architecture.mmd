@@ -1,0 +1,166 @@
+%%{init: {"flowchart": {"defaultRenderer": "elk"}} }%%
+flowchart TD
+    U["👤 Utente"]
+    LAUNCH["🚀 scripts/launch-planner.mjs<br/>(mai `pi` a mano) — cabla<br/>--skill wayfinder/to-spec/grilling/<br/>domain-modeling/setup-matt-pocock-skills<br/>SOLO per planner (Revisione 22)"]
+
+    subgraph SETUP["1 · Ricezione del task"]
+        direction TB
+        S1["Planner riceve la richiesta<br/>(chat, non MQTT)"]
+        S2{"Scope ambiguo?"}
+        S3["Fa 2-3 domande mirate<br/>all'utente per restringere<br/>il roster di specialisti"]
+        S3b["/skill:wayfinder → mappa di<br/>ticket di decisione (grilling/task/<br/>research/prototype), risolti uno<br/>alla volta; poi /skill:to-spec →<br/>spec unica. Tracker: markdown<br/>locale in .scratch/ (Revisione 22)"]
+        S4["Legge agents/roles.yaml<br/>(23 specialisti + brief,<br/>docs-sync ora sempre<br/>in ultima fase — Rev. 24)"]
+        S4b{"Serve una competenza<br/>NON presente nel roster?"}
+        S4c["Propone un nuovo ruolo<br/>(label + brief) → se confermato,<br/>lo AGGIUNGE a roles.yaml<br/>(resta lì per sempre)"]
+        S5["Sceglie team + piano a fasi<br/>(coder sempre fase 1 se si tocca<br/>codice — UNICA eccezione: fase 1<br/>= tdd-agent da solo, coder in<br/>fase 2 subito dopo, Revisione 21<br/>seguito 3; docs-sync SEMPRE<br/>nell'ultima fase, Revisione 24)"]
+        S6{"Utente conferma<br/>team + piano?"}
+        S7["Rileva herdr/tmux disponibili<br/>→ lancia TUTTE le istanze del<br/>team (mai un altro planner —<br/>planner-01 già avviato da LAUNCH).<br/>MAI paseo per il lancio: confermato<br/>non funzionante (Revisione 23)"]
+        S7b["worktree_list_open()<br/>→ elenca worktree già aperti<br/>(slug/branch/ultimo commit/<br/>riga Task del report) — Rev. 24"]
+        S7c{"Uno aperto sembra<br/>la STESSA feature<br/>di questa richiesta?"}
+        S7d["Chiede conferma esplicita<br/>all'utente: riusare quello<br/>slug/worktree/report esistente,<br/>o è davvero un task nuovo?<br/>(evita il caso reale di 3<br/>worktree per la stessa<br/>feature — Revisione 24)"]
+        S8["worktree_create(slug)<br/>→ git worktree isolato<br/>+ reports/&lt;slug&gt;.md"]
+        S9{"Il task TOCCA codice?"}
+        S10["plan_set(slug, fasi)<br/>⚠ rifiuta se fase 1 non<br/>include 'coder' (eccezione:<br/>tdd-agent da solo, coder poi<br/>in fase 2) o un ruolo è in 2 fasi<br/>⚠ rifiuta anche se l'ULTIMA fase<br/>non include 'docs-sync' (Rev. 24)"]
+        S11["NESSUN plan_set:<br/>agent_send resta<br/>completamente ungated<br/>per questo slug"]
+
+        S1 --> S2
+        S2 -- "sì, piccolo/chiaro<br/>in 2-3 scambi" --> S3 --> S4
+        S2 -- "sì, grande/ambiguo" --> S3b --> S4
+        S2 -- no --> S4
+        S4 --> S4b
+        S4b -- sì --> S4c --> S5
+        S4b -- no --> S5
+        S5 --> S6
+        S6 -- modifiche --> S5
+        S6 -- sì --> S7 --> S7b --> S7c
+        S7c -- "sì" --> S7d
+        S7c -- "no" --> S8
+        S7d -.->|"riusa worktree<br/>esistente, salta<br/>worktree_create"| S9
+        S8 --> S9
+        S9 -- sì --> S10
+        S9 -- no --> S11
+    end
+
+    LAUNCH -.->|"avvia (skill già cablate)"| S1
+    U -.->|"1 messaggio in chat"| S1
+    S6 -. "proposta team+piano<br/>in chat, ATTENDE" .-> U
+
+    subgraph GATE["Gate deterministico (agent_send) — Revisione 21"]
+        direction TB
+        G1{"Il piano esiste<br/>per questo slug?"}
+        G2{"Il ruolo target<br/>appartiene a una<br/>fase 'locked'?"}
+        G3["❌ RIFIUTATO — errore:<br/>'fase N ancora locked,<br/>completa la fase precedente'"]
+        G4["✅ invio consentito"]
+        G1 -- no / ungated --> G4
+        G1 -- sì --> G2
+        G2 -- sì --> G3
+        G2 -- no --> G4
+    end
+
+    subgraph PHASE1["2 · Fase 1 — coder ↔ reviewer (SEMPRE, se si tocca codice)"]
+        direction TB
+        C1["agent_send → coder<br/>(worktree_path + report)"]
+        C2["CODER: implementa,<br/>scrive/esegue TEST veri,<br/>report_append 'Round N — coder'"]
+        C3["agent_send → reviewer"]
+        R1["REVIEWER: legge il codice<br/>REALE nel worktree,<br/>RI-esegue i test (non si fida),<br/>+ checklist igiene HTTP (1b)"]
+        R2["report_append<br/>'Round N — reviewer'"]
+        R3{"Approva?"}
+        R4["agent_send → coder<br/>spiega cosa correggere<br/>(planner NON informato<br/>ancora — ciclo interno)"]
+        R5["agent_send → planner<br/>'fase 1 completa,<br/>richiedo valutazione'"]
+
+        C1 --> C2 --> C3 --> R1 --> R2 --> R3
+        R3 -- "NO" --> R4
+        R4 -.->|"torna a implementare"| C2
+        R3 -- "SÌ" --> R5
+    end
+
+    S10 --> C1
+    S11 -.->|"per task non-dev,<br/>delega diretta allo<br/>specialista giusto<br/>(vedi PHASE-N)"| SPECN
+    C1 -.->|"passa dal gate"| GATE
+    C3 -.->|"passa dal gate<br/>(coder = fase 1,<br/>mai bloccato)"| GATE
+
+    subgraph WAKE["3 · Planner si risveglia"]
+        direction TB
+        W1["Legge reports/&lt;slug&gt;.md<br/>(tutti i round finora)"]
+        W2["plan_get(slug)<br/>identifica la fase<br/>di chi lo ha svegliato"]
+        W3{"Planner è<br/>soddisfatto del<br/>contributo?"}
+        W4["report_append: perché<br/>serve un altro giro<br/>(fase resta NON completa)"]
+        W5["agent_send → coder<br/>(o refactoring-specialist)<br/>new_round: true"]
+        W6{"≥ 3 round completi<br/>sulla stessa fase<br/>SENZA conclusione?"}
+        W7["📱 STOP: riporta la situazione<br/>all'utente + notify_whatsapp<br/>esplicito (Revisione 24),<br/>NON worktree_finalize"]
+        W8{"TUTTI i ruoli<br/>della fase attuale<br/>hanno risposto?"}
+        W9["Aspetta (chiude il turno,<br/>si risveglierà quando<br/>risponde anche l'altro)"]
+        W10["plan_advance(slug, fase)<br/>→ marca 'complete',<br/>sblocca la fase N+1"]
+        W11{"Esiste una<br/>fase N+1?"}
+        W12["agent_send a OGNI ruolo<br/>della fase N+1<br/>(anche in parallelo —<br/>l'ultima fase include<br/>SEMPRE docs-sync, Rev. 24)"]
+        W13["report_append<br/>'## Report finale'"]
+        W14["worktree_finalize(slug)<br/>chiamato"]
+        W14b{"Directory principale<br/>ha modifiche NON<br/>committate? (Rev. 24)"}
+        W14c["📱 BLOCCATO: merge NON<br/>tentato, worktree intatto<br/>+ notify WhatsApp<br/>(Revisione 24)"]
+        W15{"Conflitto<br/>di merge?"}
+        W16["📱 Worktree NON toccato,<br/>file in CONFLITTO elencati<br/>automaticamente + notify<br/>WhatsApp (Revisione 24)"]
+        W16b["Se risolto A MANO fuori dal<br/>tool: worktree_abandon(slug)<br/>chiude il worktree orfano,<br/>preserva il report<br/>(Revisione 24)"]
+        W17["📱 Merge riuscito: comunica<br/>all'utente lavoro completo<br/>e salvato + notify WhatsApp"]
+
+        W1 --> W2 --> W3
+        W3 -- no --> W4 --> W6
+        W6 -- sì --> W7
+        W6 -- no --> W5
+        W3 -- sì --> W8
+        W8 -- no --> W9
+        W8 -- sì --> W10 --> W11
+        W11 -- sì --> W12
+        W11 -- no --> W13 --> W14 --> W14b
+        W14b -- sì --> W14c
+        W14b -- no --> W15
+        W15 -- sì --> W16 --> W16b
+        W15 -- no --> W17
+    end
+
+    R5 --> W1
+    W5 -.->|"riavvia il loop<br/>coder↔reviewer"| C2
+    W12 -.->|"passa dal gate<br/>(appena sbloccata<br/>da plan_advance)"| GATE
+
+    subgraph SPECN["4 · Fase N — specialisti (anche in parallelo tra loro)"]
+        direction TB
+        SP1["SPECIALISTA (es. security-evaluator,<br/>o docs-sync SEMPRE per ultimo —<br/>Rev. 24): legge/esegue codice REALE<br/>nel worktree, NON si fida del solo<br/>report altrui"]
+        SP2["Prima di editare un file<br/>condiviso: file_claim(file)<br/>(nel dubbio, claim comunque<br/>— ri-verificato, Rev. 24)"]
+        SP3{"file libero?"}
+        SP4["Aspetta / lavora<br/>su altro / segnala<br/>blocco nel round"]
+        SP5["Modifica, poi<br/>file_release(file)"]
+        SP6["report_append<br/>'Round N — &lt;ruolo&gt;'"]
+        SP7{"Trovato un problema<br/>che serve un fix<br/>di codice?"}
+        SP8["agent_send DIRETTO<br/>a coder (bypassa reviewer!)<br/>new_round: true"]
+        SP9["CODER: implementa il fix,<br/>ri-testa"]
+        SP10["agent_send → ALLO STESSO<br/>specialista che ha chiesto<br/>il fix (NON a reviewer —<br/>regola Revisione 20)"]
+        SP11{"Lo specialista<br/>è soddisfatto<br/>ora?"}
+        SP12["agent_send → planner<br/>(o a chi lo ha coinvolto)<br/>con l'esito"]
+
+        SP1 --> SP2 --> SP3
+        SP3 -- sì --> SP5 --> SP6
+        SP3 -- no --> SP4 -.-> SP2
+        SP1 --> SP6
+        SP6 --> SP7
+        SP7 -- sì --> SP8 --> SP9 --> SP10 --> SP11
+        SP11 -- no --> SP7
+        SP11 -- sì --> SP12
+        SP7 -- no, output<br/>già finale --> SP12
+    end
+
+    W12 --> SP1
+    S11 -.->|"delega diretta,<br/>sequenziamento manuale<br/>(no plan_advance):<br/>invia passo 1, aspetta<br/>risposta, poi invia<br/>passo 2..."| SP1
+    SP8 -.->|"passa dal gate<br/>(coder = sempre<br/>raggiungibile)"| GATE
+    SP12 --> W1
+
+    style GATE fill:#3a1f1f,stroke:#e06c75,color:#e06c75
+    style W7 fill:#3a1f1f,stroke:#e06c75,color:#e06c75
+    style W14c fill:#3a1f1f,stroke:#e06c75,color:#e06c75
+    style W16 fill:#3a1f1f,stroke:#e06c75,color:#e06c75
+    style W16b fill:#1f2937,stroke:#61afef,color:#61afef
+    style G3 fill:#3a1f1f,stroke:#e06c75,color:#e06c75
+    style W17 fill:#1f3a24,stroke:#7ec488,color:#7ec488
+    style U fill:#1f2937,stroke:#9ca3af,color:#e5e7eb
+    style LAUNCH fill:#1f2937,stroke:#61afef,color:#61afef
+    style S3b fill:#1f2937,stroke:#61afef,color:#61afef
+    style S7b fill:#1f2937,stroke:#61afef,color:#61afef
+    style S7d fill:#1f2937,stroke:#61afef,color:#61afef

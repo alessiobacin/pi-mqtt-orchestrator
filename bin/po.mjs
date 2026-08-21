@@ -44,6 +44,7 @@ import { runDoctor } from "../scripts/doctor.mjs";
 import { runUpdate } from "../scripts/update.mjs";
 import { runUninstall } from "../scripts/uninstall.mjs";
 import { runEndProject } from "../scripts/end-project.mjs";
+import { runWatch } from "../scripts/watch-stalls.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -61,6 +62,7 @@ function printTopUsage() {
 			"  update [--check] Aggiorna l'installazione globale all'ultima versione della repo GitHub",
 			"  uninstall [--yes] Rimuove l'installazione globale",
 			'  end [opzioni]    Chiude i run "active" del progetto nella directory corrente — `po end --help`',
+			'  watch [opzioni]  Sorvegliatore zero-token degli stall ticket — `po watch --once --help`',
 			"",
 			"  --version, -v    Stampa la versione del pacchetto installato",
 			"  --help, -h       Mostra questo messaggio",
@@ -106,6 +108,10 @@ async function main() {
 	}
 	if (sub === "end") {
 		await runEndProject({ cwd, argv: rest });
+		return;
+	}
+	if (sub === "watch") {
+		await runWatch({ cwd, argv: rest });
 		return;
 	}
 

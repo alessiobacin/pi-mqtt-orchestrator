@@ -3672,3 +3672,14 @@ Introdotto `agent_control`, tool di controllo SEPARATO dal data plane
 destinazione sia allow-listed per quel verbo. L'allow-list è configurabile in
 `config/control.json` (default in `DEFAULT_CONTROL_ALLOWLIST`); `status` è
 read-only per ogni ruolo. Test: `scripts/smoke-test-control-plane.mjs`.
+
+#### Ticket 04 — watcher zero-token (`po watch`, scripts/watch-stalls.mjs)
+
+Sorvegliatore degli stall DETACHED da qualsiasi sessione `pi`: puro Node+sqlite+mqtt,
+mai un LLM. Ogni `--once` (o con `--interval-ms` per loop) interroga orchestrator.db
+per i ticket `running` oltre soglia (`--stall-ms`, default 15 min) e per ciascuno:
+pubblica `ticket_stalled` sul topic eventi del run, appende un marker JSONL nelle
+log del workspace, e (se `.env` configurato) invia un tripwire WhatsApp. NON giudica
+(scelto: solo surfacing) né muta stato — la decisione operativa resta del planner
+(contratto di resumability). Complementare e non sostitutivo del watchdog in-process
+(Revisione 29). Test: `scripts/smoke-test-watch-stalls.mjs`.

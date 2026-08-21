@@ -188,10 +188,14 @@ async function runScenario(cwd, project) {
 	const initResult1 = await planner.call("orchestrator_init", {});
 	const dbPath = path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", "orchestratorStorage", "orchestrator.db");
 	ok(fs.existsSync(dbPath), "orchestrator.db created on disk");
-	for (const dir of ["config", "specs", "playbooks", "diagrams", "knowledge", "policies", "artifacts", "overrides"]) {
+	for (const dir of ["config", "specs", "playbooks", "diagrams", "knowledge", "policies", "artifacts", "overrides", "reports", "prompts", "logs"]) {
 		ok(fs.existsSync(path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", dir)), `workspace subdir "${dir}" created`);
 	}
-	ok(!fs.existsSync(path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", "logs")), "workspace subdir \"logs\" is NOT created (Revisione 28 — dead scaffold removed, superseded by the events table)");
+	// Revisione 37 re-added reports/prompts/logs as real workspace subdirs
+	// (moved here from the project root, so they're gitignored by default),
+	// superseding the older Revisione 28 note that called logs a dead
+	// scaffold. The loop above now asserts the exact set the temporal
+	// processor creates — kept explicit here, not relying only on the loop.
 	const configPath = path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", "config", "project.json");
 	const cfg1 = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 	ok(cfg1.schema_version === 1, "config records schema_version 1");

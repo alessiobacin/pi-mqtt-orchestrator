@@ -181,7 +181,10 @@ class FakeInstance {
 	}
 
 	logLines() {
-		const file = path.join(this.cwd, "logs", `${this.flagValues.instance}.jsonl`);
+		// Revisione 37 relocated per-instance debug logs from the project-root
+		// `logs/<instance>.jsonl` to `.pi/extensions/multiAgentOrchestrator/logs/`
+		// (the workspace's gitignored area), so resolve them there instead.
+		const file = path.join(this.cwd, ".pi", "extensions", "multiAgentOrchestrator", "logs", `${this.flagValues.instance}.jsonl`);
 		if (!fs.existsSync(file)) return [];
 		return fs.readFileSync(file, "utf-8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 	}

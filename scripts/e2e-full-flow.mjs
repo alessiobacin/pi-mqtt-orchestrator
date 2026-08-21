@@ -440,8 +440,29 @@ async function test1FullFlow(cwd, project, evo) {
 	// 8. Final report + worktree_finalize — verifies real merge + real
 	// WhatsApp dispatch to the stub Evolution API server.
 	await planner.call("report_append", { slug, section: "## Report finale\n\nTutti i round completati, isPalindrome implementato, revisionato, verificato per sicurezza, documentato." });
+
+	// Revisione 43: worktree_finalize now also refuses without an explicit
+	// docs_synced declaration (or a skip reason) — same checklist pattern as
+	// user_confirmed/e2e_tests_run/version_bumped from Revisione 42. Verify the
+	// refusal BEFORE the real successful call below (validation runs before the
+	// worktree is even touched, so this throws with no side effects).
+	await assert.rejects(
+		() => planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, push: false }),
+		/docs_synced/,
+		"worktree_finalize: refuses without docs_synced or docs_sync_skipped_reason (Revisione 43)",
+	);
+	// Use a slug with no real worktree here (not the task's own slug) so this
+	// call fails on "no worktree found" instead of actually merging — proving
+	// docs_sync_skipped_reason alone satisfies the checklist (no docs_synced
+	// error) without performing a second, unwanted real merge of the task above.
+	await assert.rejects(
+		() => planner.call("worktree_finalize", { slug: "no-such-task-for-docs-sync-check", user_confirmed: true, e2e_tests_run: true, version_bumped: true, docs_sync_skipped_reason: "no docs apply to this pure-refactor step", push: false }),
+		(err) => !/docs_synced/.test(err.message) && /no worktree found/.test(err.message),
+		"worktree_finalize: docs_sync_skipped_reason alone (no docs_synced) satisfies the checklist — it fails later, on the worktree lookup, not on the docs-sync check",
+	);
+
 	const beforeCount = evo.received.length;
-	const finalized = await planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, push: false });
+	const finalized = await planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, docs_synced: true, push: false });
 	ok(finalized.details.merged === true, "worktree_finalize: real git merge succeeded");
 	ok(!fs.existsSync(wtPath), "worktree_finalize: worktree directory actually removed from disk");
 	const mainReport = path.join(cwd, reportRel);
@@ -545,7 +566,7 @@ async function test4DirtyMainAndConflict(cwd, project) {
 	// change — the real Revisione 24 pre-flight check must block on this
 	// BEFORE even attempting the merge.
 	fs.appendFileSync(path.join(cwd, "README.md"), "\nModifica non committata nella directory principale.\n");
-	const blocked = await planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, push: false });
+	const blocked = await planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, docs_synced: true, push: false });
 	ok(blocked.details.blocked_dirty_main === true, "worktree_finalize (real code): blocked by dirty main checkout BEFORE attempting any merge");
 	ok(fs.existsSync(wtPath), "worktree_finalize: worktree left completely intact when blocked");
 
@@ -556,7 +577,7 @@ async function test4DirtyMainAndConflict(cwd, project) {
 	await git(["add", "-A"], cwd);
 	await git(["commit", "-q", "-m", "main change to README (will conflict)"], cwd);
 
-	const conflicted = await planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, push: false });
+	const conflicted = await planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, docs_synced: true, push: false });
 	ok(conflicted.details.conflict === true && conflicted.details.merged === false, "worktree_finalize (real code): reports a genuine merge conflict");
 	ok(Array.isArray(conflicted.details.conflict_files) && conflicted.details.conflict_files.includes("README.md"), "worktree_finalize (real code): automatically lists README.md as the conflicting file");
 	ok(fs.existsSync(wtPath), "worktree_finalize: worktree preserved after a conflict, for manual resolution");

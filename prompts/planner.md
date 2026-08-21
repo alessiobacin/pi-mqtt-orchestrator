@@ -506,10 +506,10 @@ il perché): se l'operatore l'ha attivata, potresti vedere un messaggio
 `[watchdog]` che ti informa di aver già terminato un'istanza bloccata da
 troppo tempo, con la stessa istruzione obbligatoria di rilanciarla.
 
-## Procedura di chiusura obbligatoria di un task (Revisione 42)
+## Procedura di chiusura obbligatoria di un task (Revisioni 42-43)
 
 **`worktree_finalize` ora RIFIUTA la chiamata** se non dichiari esplicitamente
-questi tre passaggi — non è più un promemoria che si può dimenticare, è
+questi quattro passaggi — non è più un promemoria che si può dimenticare, è
 imposto dal codice:
 
 1. **`user_confirmed: true`** — devi aver chiesto ESPLICITAMENTE all'utente
@@ -524,20 +524,36 @@ imposto dal codice:
 3. **`version_bumped: true`** (oppure `version_bump_skipped_reason` se non
    applicabile) — il marcatore di versione del progetto (`package.json` o
    equivalente) deve essere stato incrementato come parte del task.
+4. **`docs_synced: true`** (oppure `docs_sync_skipped_reason` se non
+   applicabile) — **nuovo in Revisione 43, richiesto esplicitamente
+   dall'operatore**: un passaggio di sincronizzazione documentazione deve
+   aver confrontato per davvero README/QUICK-START.md/diagramma
+   d'architettura/ogni altro doc che nomina ciò che questo task ha toccato
+   contro lo stato reale del codice, e corretto ciò che era disallineato —
+   non basta che il codice funzioni, la documentazione del progetto non deve
+   restare silenziosamente indietro. Delega questo a `docs-sync` (il ruolo
+   dedicato, sezione "Selezione dinamica del team" sotto) come parte
+   normale del team di ogni task che tocca comportamento/API/setup visibili
+   all'esterno — non solo per task esplicitamente "di documentazione". Se il
+   task è puramente interno e non c'è alcun doc che lo nomini o lo
+   presupponga (es. un refactor che non cambia comportamento osservabile),
+   usa `docs_sync_skipped_reason` per dichiararlo esplicitamente invece di
+   ometterlo.
 
-Una volta ricevuta la conferma dell'utente al punto 1, i punti 2-3 (più
+Una volta ricevuta la conferma dell'utente al punto 1, i punti 2-4 (più
 commit e push) sono **automatici, in sequenza, senza chiedere ulteriore
 permesso**: fai eseguire i test e2e (delega a chi di dovere se non l'hai già
-fatto durante il task), fai incrementare la versione, poi chiama
-`worktree_finalize` — che ora, di default (`push` non è `false`), **fa anche
-il push al remote** dopo il merge, non solo il commit locale. Se non vuoi che
-questo task venga pushato subito, passa `push: false` esplicitamente e
-motiva perché nel report.
+fatto durante il task), fai incrementare la versione, fai passare docs-sync
+sui documenti del progetto, poi chiama `worktree_finalize` — che ora, di
+default (`push` non è `false`), **fa anche il push al remote** dopo il merge,
+non solo il commit locale. Se non vuoi che questo task venga pushato subito,
+passa `push: false` esplicitamente e motiva perché nel report.
 
 Queste sono comunque autodichiarazioni (il tool non verifica in modo
-indipendente che i test siano davvero passati) — ma dichiarare il falso
-lascia comunque una traccia nell'event log (`worktree_finalize_checklist`),
-invece che il passaggio non essere mai stato considerato affatto.
+indipendente che i test siano davvero passati o che i documenti siano
+davvero coerenti) — ma dichiarare il falso lascia comunque una traccia
+nell'event log (`worktree_finalize_checklist`), invece che il passaggio non
+essere mai stato considerato affatto.
 
 ## Selezione dinamica del team (prima di delegare un task nuovo)
 

@@ -6,6 +6,73 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 43 — la procedura di chiusura obbligatoria (Revisione 42) guadagna un quarto passaggio: docs-sync
+
+**Richiesta esplicita dell'operatore**, subito dopo aver ricevuto e testato la
+Revisione 42: oltre a test e2e, bump versione, commit, push, ci deve **sempre**
+essere anche un agente che sincronizza tutti i documenti del progetto alle
+ultime modifiche, come parte della stessa procedura di chiusura obbligatoria —
+non un passo facoltativo lasciato alla memoria del planner.
+
+**Perché questo non era già coperto**: il ruolo `docs-sync` esiste dalla
+Revisione 28 (sezione 43 di `claude/architecture.md`) ed è già normalmente
+incluso nel team quando il planner lo ritiene pertinente — ma "quando lo
+ritiene pertinente" è esattamente il tipo di giudizio discrezionale che la
+Revisione 42 ha appena dimostrato non essere abbastanza affidabile da solo
+(lo stesso motivo per cui `user_confirmed`/`e2e_tests_run`/`version_bumped`
+sono ora dichiarazioni obbligatorie, non convenzioni di prompt). Senza un
+gate strutturale, nulla impedisce che un task chiuda con codice funzionante
+ma README/QUICK-START/diagramma d'architettura silenziosamente disallineati.
+
+**Fix, stesso pattern esatto delle tre dichiarazioni della Revisione 42**
+(`extensions/orchestrator.ts`, tool `worktree_finalize`): nuova coppia di
+parametri `docs_synced: Type.Optional(Boolean)` / `docs_sync_skipped_reason:
+Type.Optional(String)` — uno dei due obbligatorio, validato PRIMA di
+qualunque operazione git, esattamente come `e2e_tests_run`/`version_bumped`.
+Mancante o incompleto, la chiamata viene rifiutata con un errore che nomina
+esplicitamente cosa manca. L'evento `worktree_finalize_checklist` registra
+ora anche questi due campi, per la stessa ragione di audit delle altre tre
+dichiarazioni: un falso dichiarato lascia comunque una traccia nell'event
+log, invece che il passaggio non essere mai stato considerato.
+
+`prompts/planner.md` (sezione "Procedura di chiusura obbligatoria",
+rinominata per riferirsi a entrambe le Revisioni 42-43): il quarto punto
+istruisce esplicitamente a includere `docs-sync` nel team di ogni task che
+tocca comportamento/API/setup visibili all'esterno (non solo per task
+esplicitamente "di documentazione"), e a usare `docs_sync_skipped_reason`
+per un task puramente interno senza alcun doc che lo nomini — invece di
+ometterlo silenziosamente.
+
+**Verificato**: `scripts/e2e-full-flow.mjs` — i tre call site esistenti di
+`worktree_finalize` (flusso completo, blocco per merge conflict, blocco per
+main sporca) aggiornati con `docs_synced: true` (il TEST 1 ha già
+un'istanza `docsSync` reale nel team che riporta un round prima della
+finalizzazione — la dichiarazione non è quindi solo nominale, riflette un
+lavoro di sincronizzazione realmente avvenuto nello scenario di test). Due
+nuove asserzioni aggiunte prima del primo finalize riuscito: (a) omettere
+sia `docs_synced` che `docs_sync_skipped_reason` fa rifiutare la chiamata
+con un errore che nomina `docs_synced`; (b) `docs_sync_skipped_reason` da
+solo (senza `docs_synced`) supera la validazione del checklist — verificato
+usando uno slug inesistente apposta, cosicché la chiamata fallisca dopo,
+sulla ricerca del worktree, non sul controllo docs-sync, evitando così un
+secondo merge reale indesiderato dello stesso task. Suite completa
+riverificata verde: tutti i 20 smoke test + `e2e-full-flow.mjs` (50
+asserzioni via il contatore `ok()`, più le due nuove verifiche di rifiuto)
++ `check-syntax`/`check-skill-isolation`, più uno smoke test manuale
+completo della CLI `po` (`npm install -g .`, `po init --force`, `po start
+--print-only`, `po end --list`).
+
+**Versione**: bump a `1.2.2` (`package.json`), da `1.2.1` (Revisione 42).
+
+**Limite onesto, stesso di `e2e_tests_run`/`version_bumped`**: `docs_synced`
+è un'autodichiarazione, non verificata indipendentemente da questo codice —
+l'estensione non confronta essa stessa i documenti del progetto ospitato col
+suo codice, si fida che chi dichiara `true` lo abbia fatto per davvero (o
+abbia delegato a `docs-sync` per farlo). Un planner che ignora questa
+istruzione può comunque dichiarare `docs_synced: true` senza aver mai
+davvero controllato nulla — il gate rende il passaggio esplicito e
+tracciato, non impossibile da falsificare.
+
 ## Revisione 42 — istanze morte rilevate subito (non più dopo 15-30 min), planner strutturalmente escluso da `ticket_claim`, kill/relaunch, chiusura task obbligatoria (conferma utente + e2e + version bump + commit + push)
 
 **Richiesta esplicita dell'operatore, tre punti in un solo messaggio**, dopo aver

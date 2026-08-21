@@ -3163,7 +3163,12 @@ export default function (pi: ExtensionAPI) {
 			"end-to-end/full test suite was actually run as part of this task, by coder/reviewer/e2e-simulator — not by you) or " +
 			"e2e_tests_skipped_reason explaining why none applies (e.g. a pure-docs task with no e2e suite to run); (c) either " +
 			"version_bumped:true (the project's own version marker was bumped as part of this task) or " +
-			"version_bump_skipped_reason explaining why not. These are self-declarations, not independently verified by this " +
+			"version_bump_skipped_reason explaining why not; (d) either docs_synced:true — a docs-sync pass (docs-sync role, or " +
+			"you doing the equivalent check yourself) actually compared the project's own README/QUICK-START/architecture " +
+			"diagram/any other doc that names what this task touched against the real end state and fixed what had gone stale — " +
+			"or docs_sync_skipped_reason explaining why none applies (Revisione 43 — requested explicitly: a task isn't really " +
+			"closed if its own documentation quietly drifted out of sync with what actually shipped). These are " +
+			"self-declarations, not independently verified by this " +
 			"tool — but an explicit false/lie is now on the record in the event log, instead of the step simply never having " +
 			"been considered at all.\n\n" +
 			"On success, if a .env with Evolution API settings is present (see .env.example, Revisione 19), this also sends a " +
@@ -3179,6 +3184,8 @@ export default function (pi: ExtensionAPI) {
 			e2e_tests_skipped_reason: Type.Optional(Type.String({ description: "Required if e2e_tests_run is not true: why no e2e run applies to this task." })),
 			version_bumped: Type.Optional(Type.Boolean({ description: "The project's own version marker (package.json or equivalent) was bumped as part of this task." })),
 			version_bump_skipped_reason: Type.Optional(Type.String({ description: "Required if version_bumped is not true: why no version bump applies to this task." })),
+			docs_synced: Type.Optional(Type.Boolean({ description: "A docs-sync pass actually compared the project's own README/QUICK-START/architecture diagram/other docs against the real end state of this task and fixed anything stale." })),
+			docs_sync_skipped_reason: Type.Optional(Type.String({ description: "Required if docs_synced is not true: why no docs-sync pass applies to this task." })),
 			push: Type.Optional(Type.Boolean({ description: "Push the main branch to its remote after a successful merge. Defaults to true — set false only if you deliberately don't want this task pushed yet." })),
 		}),
 		async execute(_callId, params) {
@@ -3205,6 +3212,13 @@ export default function (pi: ExtensionAPI) {
 						"this task) or version_bump_skipped_reason explaining why not (Revisione 42).",
 				);
 			}
+			if (!params.docs_synced && !params.docs_sync_skipped_reason) {
+				throw new Error(
+					"worktree_finalize: refused — pass docs_synced:true (a docs-sync pass compared the project's own docs against " +
+						"what this task actually shipped and fixed anything stale) or docs_sync_skipped_reason explaining why none " +
+						"applies to this task (Revisione 43).",
+				);
+			}
 			logEvent("worktree_finalize_checklist", {
 				slug,
 				user_confirmed: params.user_confirmed,
@@ -3212,6 +3226,8 @@ export default function (pi: ExtensionAPI) {
 				e2e_tests_skipped_reason: params.e2e_tests_skipped_reason ?? null,
 				version_bumped: !!params.version_bumped,
 				version_bump_skipped_reason: params.version_bump_skipped_reason ?? null,
+				docs_synced: !!params.docs_synced,
+				docs_sync_skipped_reason: params.docs_sync_skipped_reason ?? null,
 			});
 			await assertGitRepo(identity.cwd);
 			const { path: wtPath, branch } = worktreePaths(identity.cwd, slug);

@@ -12,4 +12,12 @@ restano opzionali/futuri.
 
 Type: grilling
 Blocked by:
-Status:
+Status: resolved
+
+## Answer
+
+Decisione (operatore, 2026-08-21): VOGLIO TUTTO. Entrano nel ciclo di
+ottimizzazione: `status`, `gantt`/`web`, `logs`, `provision`/`deps`,
+`fleet`, `mcp`, `skills`, `doctor --network`. Si affiancano agli esistenti
+(init/start/doctor/update/uninstall) e a `po end` (già aggiunto nella v.38).
+Nessun comando proposto viene scartato in questo ciclo.

@@ -35,7 +35,23 @@ tooling con documento esaustivo, gantt live web, away-mode. La fine del percorso
 
 <!-- one line per closed ticket: gist + link -->
 
-_(nessuna ancora risolta — frontiera aperta)_
+_(risolti: 05, 06, 07, 08, 12 — vedi i singoli ticket in issues/)_.
+
+Riepilogo decisioni prese (2026-08-21, dal dialogo con l'operatore):
+- **05** — Ricerca web nel planner (niente ruolo `researcher`), fallback su guida in
+  file se il prompt cresce troppo; ricerca opzionale per task banali/non-dev.
+- **06** — Preflight credenziali/CLI/MCP nel planning, gate `human_approval`; planner
+  chiede wait-vs-async; → ticket 13 (script dinamico capability-probe / `po deps`).
+- **07** — SINGOLO worktree condiviso per task + blocco file; niente
+  worktree-per-agente + merge-agent in questa ottimizzazione; sparse-checkout = opz.
+- **08** — secondmate ≠ concetto nuovo; secondo planner = istanza con run diversa;
+  → ticket 14 (team planner per istanza documentato e testato).
+- **12** — CLI po: entrano TUTTI i comandi proposti (status, gantt/web, logs,
+  provision/deps, fleet, mcp, skills, doctor --network), accanto a end (già v.38).
+
+TICKET NUOVI: 13 (script dinamico credenziali, blocked by 06), 14 (team planner
+per istanza). Frontier residua: 01, 02, 03, 04, 09, 10, 11 (design/lavoro planner),
+13, 14.
 
 ## Not yet specified
 
@@ -46,7 +62,7 @@ _(nessuna ancora risolta — frontiera aperta)_
   l'integrazione coi pattern firstmate (coda+lock+generazione, decision-hold,
   control/data plane) vs reinventare.
 - **Portata esatta del documento esaustivo** (punto "documento di tutte le cose
-  da fare") e dove vive (in `.scratch/`? nel repo? in config tenté?).
+  da fare") e dove vive (in `.scratch/`? nel repo? in config? ).
 
 ## Out of scope
 

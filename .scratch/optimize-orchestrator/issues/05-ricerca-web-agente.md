@@ -19,4 +19,16 @@ il punto di partenza di plan_set/ticket.
 
 Type: grilling
 Blocked by:
-Status:
+Status: resolved
+
+## Answer
+
+Decisione (operatore, 2026-08-21): NIENTE nuovo ruolo `researcher` — si tiene
+TUTTO nel planner, se il prompt del planner non diventa troppo grosso. Il flusso
+di ricerca web (progetti simili + tool migliori per ogni agente) vive come
+istruzioni/guida che il planner consulta, non come istanza/ruolo separato. Guardia:
+se il prompt del planner cresce oltre il sopportabile, estrarre la guida di
+ricerca in un file di riferimento che il planner legge su richiesta (es.
+prompts/research-guide.md), non una nuova istanza. La ricerca resta opzionale:
+per task banali/non-dev il planner salta o riduce la ricerca web (decisione caso
+per caso).

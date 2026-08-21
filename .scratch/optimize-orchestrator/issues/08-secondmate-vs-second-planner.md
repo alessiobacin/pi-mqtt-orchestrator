@@ -16,4 +16,17 @@ planner"?
 
 Type: grilling
 Blocked by:
-Status:
+Status: resolved
+
+## Answer
+
+Confermato (operatore, 2026-08-21): secondmate = forma distribuita multi-host del
+planner, NON un concetto nuovo da implementare ora. Un "secondo planner" è già
+solo una seconda istanza (`--instance planner-02`, `--role planner`) che orchestra
+una run diversa. NON si implementa secondmate in questa ottimizzazione.
+
+Requisito aggiuntivo (operatore): assicurarsi che altre istanze di planner nello
+stesso progetto possano avere un team diverso dal team del planner-01. Già
+possibile (team risolto per istanza in agents.yaml via resolveCapabilities,
+INSTANCE>ROLE; topic team per progetto). Aggiunto ticket 14 per documentarlo e
+verificarlo con un test.

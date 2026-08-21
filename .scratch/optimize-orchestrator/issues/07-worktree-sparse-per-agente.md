@@ -18,10 +18,20 @@ Dunque:
   conflitti su tree/file spostati). Da fare solo se il parallelismo reale richiede
   davvero collisioni zero.
 
-Decisione richiesta all'operatore: adottare sparse-checkout DENTRO il singolo
-worktree adesso, e rimandare/trattare worktree-per-agente come progetto a sé (con
-spec dedicata)? O vuole realmente il secondo subito?
+Decisione (operatore, 2026-08-21): si mantiene il sistema attuale — SINGOLO
+worktree condiviso per task + blocco file (`file_claim`/`file_release`) per il
+parallelismo. È PIÙ efficiente: un solo worktree per task = meno spazio di un
+worktree-per-agente. Worktree-per-agente + merge-agent NON si fanno in questa
+ottimizzazione: restano concetto documentato per il futuro. sparse-checkout è
+ottimizzazione additiva del singolo worktree (riduce checkout senza impatto merge):
+opzionale, bassa priorità, non bloccante.
 
 Type: grilling
 Blocked by:
-Status:
+Status: resolved
+
+## Answer
+
+Scelta dell'operatore: restare sul singolo worktree condiviso per task con blocco
+file. sparse-checkout = ottimizzazione opzionale additiva (bassa priorità). Nessun
+cambio architetturale sul modello di worktree in questa ottimizzazione.

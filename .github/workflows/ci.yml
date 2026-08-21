@@ -74,6 +74,7 @@ jobs:
           node --experimental-strip-types scripts/smoke-test-worktree-cwd-guard.mjs
           node --experimental-strip-types scripts/smoke-test-ticket-engine.mjs
           node --experimental-strip-types scripts/smoke-test-approval-gate.mjs
+          node --experimental-strip-types scripts/smoke-test-control-plane.mjs
           node --experimental-strip-types scripts/smoke-test-reconciliation.mjs
           node --experimental-strip-types scripts/smoke-test-team-per-instance.mjs
           node --experimental-strip-types scripts/smoke-test-project-scoping.mjs

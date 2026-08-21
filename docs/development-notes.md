@@ -3662,3 +3662,13 @@ risolve `teams` per istanza (INSTANCE aggiunge al ROLE default da `agents.yaml`)
 e i topic `pi/<project>/teams/<team>/events` sono per-progetto.
 `po start`/`launch-planner.mjs` NON forzano un team unico — compongono solo i flag
 `--skill`. Test: `scripts/smoke-test-team-per-instance.mjs`.
+
+#### Tickets 01 + 03 — control plane allow-list (`agent_control`)
+
+Introdotto `agent_control`, tool di controllo SEPARATO dal data plane
+(`agent_send`). Accetta solo un set allow-listed di verbi (`launch`/`interrupt`/
+`relaunch`/`status`), mai testo/keys liberi. I verbi che pilotano un processo
+(`launch`/`interrupt`/`relaunch`) sono planner-only e richiedono che il binary di
+destinazione sia allow-listed per quel verbo. L'allow-list è configurabile in
+`config/control.json` (default in `DEFAULT_CONTROL_ALLOWLIST`); `status` è
+read-only per ogni ruolo. Test: `scripts/smoke-test-control-plane.mjs`.

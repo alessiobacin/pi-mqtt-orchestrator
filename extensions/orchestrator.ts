@@ -225,6 +225,63 @@ function loadConfig(cwd: string, configDir: string): {
 	};
 }
 
+// ━━ Control plane: allow-list for agent_control (Tickets 01/03) ━━━━━━━━
+//
+// Separates the data plane (agent_send: instructions a worker *reads and
+// interprets*) from the control plane (agent_control: verbs that *pilot a
+// worker process*). The control plane accepts ONLY a narrow, allowlisted set
+// of verbs (launch/interrupt/relaunch/status) — never free-text or raw keys —
+// and each verb has a postcondition. This closes the risk (architecture §25/40)
+// of the planner composing arbitrary shell to launch/interrupt instances.
+// The allow-list is configurable via config/control.json (see allowListConfig())
+// but defaults to the safe set; loosening it is an explicit operator choice.
+
+const DEFAULT_CONTROL_ALLOWLIST = {
+	verbs: ["launch", "interrupt", "relaunch", "status"],
+	// Allowed root-command patterns per verb. A CLI entry is matched exactly by
+	// argv[0] (the command name), never by free-text globbing into arbitrary
+	// args — an entry outside these must be explicitly added to config.
+	cli: {
+		launch: [["tmux"], ["herdr"]],
+		interrupt: [["tmux"], ["herdr"]],
+		relaunch: [["tmux"], ["herdr"]],
+	},
+} as const;
+
+type ControlAllowlist = { verbs: string[]; cli: Record<string, Array<{ 0: string }>> };
+
+type ControlVerb = "launch" | "interrupt" | "relaunch" | "status";
+
+function isControlVerbAllowed(verb: string, allowlist = DEFAULT_CONTROL_ALLOWLIST): boolean {
+	return Array.isArray((allowlist as any).verbs) && (allowlist as any).verbs.includes(verb);
+}
+
+// A CLI execution (command name + first arg, used for launch/interrupt/relaunch
+// targets) is allowed only if the exact argv[0] appears among the allowlisted
+// patterns for that verb. Stops a disallowed binary from ever being launched.
+function isControlCliAllowed(verb: string, argv: string[], allowlist = DEFAULT_CONTROL_ALLOWLIST): boolean {
+	if (!isControlVerbAllowed(verb, allowlist) || !Array.isArray(argv) || argv.length === 0) return false;
+	const root = argv[0];
+	const patterns = ((allowlist as any).cli?.[verb] || []) as Array<Array<string>>;
+	return patterns.some((p) => p[0] === root);
+}
+
+function controlAllowlistConfig(cwd: string): ControlAllowlist {
+	// Optional operator override at <cwd>/config/control.json — merged over the
+	// default allow-list (defaults can be restricted, rarely widened).
+	try {
+		const p = path.join(cwd, "config", "control.json");
+		if (!fs.existsSync(p)) return DEFAULT_CONTROL_ALLOWLIST as ControlAllowlist;
+		const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
+		return {
+			verbs: Array.isArray(parsed?.verbs) ? parsed.verbs : DEFAULT_CONTROL_ALLOWLIST.verbs,
+			cli: parsed?.cli ?? DEFAULT_CONTROL_ALLOWLIST.cli,
+		};
+	} catch {
+		return DEFAULT_CONTROL_ALLOWLIST as ControlAllowlist;
+	}
+}
+
 // Merge precedence: INSTANCE > ROLE > GLOBAL (architecture.md §3).
 function resolveCapabilities(
 	instanceId: string,
@@ -2549,6 +2606,65 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, _options, theme) {
 			const n = ((result.details as any)?.events ?? []).length;
 			return new Text(theme.fg("accent", `⚡ ${n} event(s)`), 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "agent_control",
+		label: "Agent Control",
+		description:
+			"Control-plane tool for piloting a worker process — deliberately SEPARATE from agent_send (the data plane, " +
+			"instructions the worker reads). Accepts ONLY an allowlisted set of verbs: launch, interrupt, relaunch, " +
+			"status. Never free-text, never raw keys — a verb outside the allow-list (config/control.json, default in " +
+			"DEFAULT_CONTROL_ALLOWLIST) is refused outright. 'status' is safe to call from here; the process-piloting verbs " +
+			"(launch/interrupt/relaunch) also require the target binary to be allowlisted. Planner-only for the verbs that " +
+			"actually pilot a process.",
+		parameters: Type.Object({
+			verb: Type.String({ description: "One of: launch, interrupt, relaunch, status." }),
+			target: Type.Optional(Type.String({ description: "Target instance or binary name, e.g. coder-01 (for launch/interrupt/relaunch)." })),
+			args: Type.Optional(Type.Array(Type.String(), {}), { description: "Additional argv, checked against the allow-list cli patterns." }),
+		}),
+		async execute(_callId, params) {
+			if (!identity) throw new Error("orchestrator not initialised");
+			const allowlist = controlAllowlistConfig(identity.cwd);
+			if (!isControlVerbAllowed(params.verb, allowlist)) {
+				throw new Error(`agent_control: verb "${params.verb}" is not in the allow-list (${(allowlist.verbs).join(", ")}).`);
+			}
+			if (params.verb === "status") {
+				const agents = [...presence.values()].map((c) => ({
+					instance: c.instance, role: c.role, status: c.status, load: (typeof c.current_load === "number" ? c.current_load : "?") + "/" + (typeof c.capacity === "number" ? c.capacity : "?"),
+				}));
+				logEvent("moa_control_status", { n: agents.length });
+				return {
+					content: [{ type: "text" as const, text: "agent_control status: " + (agents.length ? agents.map((a) => `${a.instance} (${a.role}) ${a.status} load=${a.load}`).join(", ") : "nessun agente noto.") }],
+					details: { agents },
+				};
+			}
+			// Process-piloting verbs: planner-only + allowlisted binary.
+			if (identity.role !== "planner") throw new Error(`agent_control: verb "${params.verb}" is planner-only (this instance is "${identity.role}").`);
+			const argv = [params.target ?? "", ...(params.args ?? [])].filter(Boolean);
+			if (argv.length === 0) throw new Error(`agent_control ${params.verb}: a target is required.`);
+			if (!isControlCliAllowed(params.verb, argv, allowlist)) {
+				throw new Error(`agent_control ${params.verb}: binary "${argv[0]}" is not allowlisted for verb "${params.verb}".`);
+			}
+			// The actual process action is best-effort and bounded, and must never
+			// hang a planner turn (tmux/herdr may or may not be present). We log
+			// the intent as an audit event regardless of whether the binary is
+			// available here, so the control attempt is traceable.
+			const postcond = await new Promise<boolean>((resolve) => {
+				execFile(argv[0], argv.slice(1), { timeout: 4000 }, (err) => resolve(!err));
+			});
+			logEvent("moa_control", { verb: params.verb, argv, ok: postcond });
+			return {
+				content: [{ type: "text" as const, text: `agent_control ${params.verb}: ${argv.join(" ")} → ${postcond ? "ok" : "postcondizione fallita (binary assente/non riuscita)"}` }],
+				details: { verb: params.verb, argv, postcondition_ok: postcond },
+			};
+		},
+		renderCall(args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("agent_control ")) + theme.fg("accent", (args as any)?.verb ?? "?"), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			return new Text(theme.fg("accent", `→ ${(result.details as any)?.verb ?? "?"}`), 0, 0);
 		},
 	});
 

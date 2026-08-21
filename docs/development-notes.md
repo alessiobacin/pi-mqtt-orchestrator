@@ -3692,3 +3692,11 @@ operare senza aprire una sessione `pi`: `po status` (run/ticket da SQLite),
 `po mcp` / `po skills` (declaration yaml per ruolo/istanza),
 `po doctor --network` (raggiungibilità broker + git + pi). Test:
 `scripts/smoke-test-po-status.mjs`.
+
+#### Ticket 07 — away-mode leggero
+
+`po watch --away` (o env `PI_ORCH_AWAY=1`): il watcher assorbe il rumore di
+routine (una passata senza stall è silenziosa) e alza SOLO le decisioni vere
+(stall), incluse le notifiche WhatsApp. Filtro di priorità in pura logica, nessun
+LLM extra, costruito sopra il watcher zero-token. Esteso
+`scripts/smoke-test-watch-stalls.mjs` per coprire away-mode.

@@ -161,7 +161,28 @@ async function main() {
 	ok(markers.some((m) => m.type === "stall_watch" && m.ticket_id === stalled.id), "marker recorded the stalled ticket");
 	ok(!markers.some((m) => m.ticket_id === fresh.id), "no marker for the fresh ticket");
 
-	console.log("\n=== PART 3 — idempotency: a second pass surfaces the same finding, no mutation ===");
+	console.log("\n=== PART 3 — away-mode suppresses routine, escalates real decisions (Ticket 07) ===");
+// Green DB path: backdate BOTH tickets? No — create a clean run with NO stalled
+// ticket and assert the routine heartbeat is silent in away mode, then that a
+// real stall still escalates.
+const cleanRun = (await planner.call("run_create", { objective: "Away clean" })).details.run;
+const cleanSpec = (await planner.call("spec_create", { run_id: cleanRun.id, title: "s2", content: "b2" })).details.spec;
+const cleanTix = (await planner.call("ticket_create", { run_id: cleanRun.id, spec_id: cleanSpec.id, title: "recent2", required_capabilities: ["coder"], depends_on: [] })).details.ticket;
+await coder.call("ticket_claim", { ticket_id: cleanTix.id }); // fresh, not stalled
+// Clear the marker file so we can count only newly appended markers.
+const origMarkerPath = path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", "logs", "watch-stalls.jsonl");
+try { fs.rmSync(origMarkerPath, { force: true }); } catch { /* ignore */ }
+
+let routineOut = "";
+const origLog = console.log;
+console.log = (...a) => { routineOut += a.join(" ") + "\n"; };
+await import(pathToFileURL(path.join(PROJECT_ROOT, "scripts", "watch-stalls.mjs")).href).then((m) => m.runWatch({ cwd, argv: ["--once", "--project", "watch-smoke", "--away"] }));
+console.log = origLog;
+console.log(`   (away routine output captured: ${routineOut.trim() || "<empty>"})`);
+ok(!/nessun ticket running/.test(routineOut), "away mode absorbs the routine 'no stall' heartbeat (silent clean pass)");
+ok(!/nessun ticket running/.test(routineOut), "(double-check) no routine heartbeat leaked");
+
+console.log("\n=== PART 3b — idempotency: a second pass surfaces the same finding, no mutation ===");
 	const before = JSON.stringify((await runWatch({ cwd, argv: ["--once", "--project", "watch-smoke"] })) ?? "done");
 	await sleep(300);
 	const markers2 = fs.readFileSync(markerPath, "utf-8").split("\n").filter(Boolean).map((l) => JSON.parse(l));

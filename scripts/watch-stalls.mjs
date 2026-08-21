@@ -22,8 +22,17 @@
 // detached tripwire so stalls are still surfaced when no planner is open.
 //
 // Uso:
-//   po watch [--project <slug>] [--stall-ms 900000] [--interval-ms 60000] [--once]
+//   po watch [--project <slug>] [--stall-ms 900000] [--interval-ms 60000] [--once] [--away]
 //   (in locale: node scripts/watch-stalls.mjs [stesse opzioni])
+//
+// Away-mode (Ticket 07): con `--away` il watcher assorbe il rumore di routine
+// (una passata senza stall è silenziosa) e alza SOLO le decisioni vere (uno o
+// più stall), incluse le notifiche WhatsApp. Nessun LLM extra — è il filtro di
+// priorità in pura logica.
+//
+// Oppure `--away` può essere guidato da env: quando PI_ORCH_AWAY=1 la routine
+// viene assorbita allo stesso modo, così il watcher può essere lanciato una
+// volta e rimanere silenzioso mentre l'operatore è lontano.
 
 import { existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { readFileSync } from "node:fs";
@@ -35,13 +44,14 @@ import mqtt from "mqtt";
 const moaRequire = createRequire(import.meta.url);
 
 function parseArgs(argv) {
-	const o = { project: null, stallMs: 900000, intervalMs: 60000, once: false };
+	const o = { project: null, stallMs: 900000, intervalMs: 60000, once: false, away: false };
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === "--project") o.project = argv[++i];
 		else if (a === "--stall-ms") o.stallMs = Number(argv[++i]);
 		else if (a === "--interval-ms") o.intervalMs = Number(argv[++i]);
 		else if (a === "--once") o.once = true;
+		else if (a === "--away" || a === "-aw") o.away = true;
 	}
 	return o;
 }
@@ -122,8 +132,12 @@ export async function runWatch({ cwd, argv }) {
 	}
 
 	if (stalled.length === 0) {
-		console.log(`po watch: nessun ticket running oltre ${Math.round(opts.stallMs / 60_000)} min (project "${project}").`);
+		// Away-mode (Ticket 07): a clean 'no stall' pass is routine/heartbeat —
+		// absorb it (silence) instead of paging the operator on every sweep.
+		if (!awayEnabled(opts)) console.log(`po watch: nessun ticket running oltre ${Math.round(opts.stallMs / 60_000)} min (project "${project}").`);
 	} else {
+		// A real stall is a genuine decision — surface it in BOTH modes (away
+		// still escalates real decisions; it only absorbs routine noise).
 		console.log(`po watch: ${marker.length} stall rilevat${marker.length === 1 ? "o" : "i"} — pubblicati su MQTT e loggati. La decisione operativa è del planner, non del watcher.`);
 	}
 
@@ -150,9 +164,15 @@ export async function runWatch({ cwd, argv }) {
 
 	if (opts.once || opts.intervalMs <= 0) return; // single pass — let the caller decide to exit
 	// Real watcher loop: after this pass, wait intervalMs then run again.
+	// Env-gated away mode is honored on every pass, so `--away` can be implied
+	// by PI_ORCH_AWAY=1 even if the process was launched without the flag.
 	setTimeout(() => {
 		runWatch({ cwd, argv }).catch((e) => { console.error(e); process.exit(1); });
 	}, opts.intervalMs);
+}
+
+function awayEnabled(opts) {
+	return opts.away || String(process.env.PI_ORCH_AWAY || "") === "1";
 }
 
 // Direct invocation: `node scripts/watch-stalls.mjs --once` — only here do we

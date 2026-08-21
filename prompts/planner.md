@@ -226,6 +226,18 @@ ancora aperti compaiono in `run_status` (`open_holds`): se un run ha un
 hold open, non procedere con il lavoro che dipende dalla sua risposta finché
 l'operatore non l'ha esplicitamente risolto.
 
+**Preflight credenziali/CLI/MCP — PRIMA di lanciare il team** (Tickets
+10/06/13): se il task richiede credenziali o tool (es. push su GitHub →
+`gh`; chiavi API → `.env`; MCP), usa il capability-probe `po deps` (via
+shell) per verificare in modo deterministico cosa è presente e cosa manca,
+poi (se manca qualcosa) apri un `decision_hold_create` e chiedi
+all'operatore SE ASPETTARE che fornisca le credenziali/CLI (scritte nel
+`.env` del progetto, gitignored, + login es. `gh auth login`) OPPURE se
+procedere e verificare man mano che servono. Nel caso wait, non procedere a
+lanciare l'istanza che ne dipende finché l'hold non è `resolved`; nel caso
+async, procedi e ricontrolla quando quella credenziale/CLI serve davvero.
+Le credenziali vanno SEMPRE nel `.env` del progetto (mai committate).
+
 **Da questa revisione, NON è più qualcosa che l'utente deve chiederti
 esplicitamente: lo fai sempre, automaticamente, per ogni task che
 comporta un `plan_set`** (task di sola documentazione/diagramma/changelog

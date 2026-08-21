@@ -46,6 +46,7 @@ import { runUninstall } from "../scripts/uninstall.mjs";
 import { runEndProject } from "../scripts/end-project.mjs";
 import { runWatch } from "../scripts/watch-stalls.mjs";
 import { runPoStatus } from "../scripts/po-status.mjs";
+import { runPoDeps } from "../scripts/po-deps.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -70,6 +71,7 @@ function printTopUsage() {
 			'  mcp [role]       Server/ruoli MCP dichiarati — read-only',
 			'  skills [role]    Skill per ruolo/istanza dichiarate — read-only',
 			'  doctor --network Verifica raggiungibilità broker + git + pi — read-only',
+			'  deps [opzioni]    Capability-probe: credenziali .env + cli + auth presenti? (read-only)',
 			"",
 			"  --version, -v    Stampa la versione del pacchetto installato",
 			"  --help, -h       Mostra questo messaggio",
@@ -112,6 +114,10 @@ async function main() {
 	if (sub === "status" || sub === "logs" || sub === "fleet" || sub === "mcp" || sub === "skills") {
 		await runPoStatus({ cwd, argv: [sub, ...rest] });
 		return;
+	}
+	if (sub === "deps" || sub === "provision") {
+		const r = await runPoDeps({ cwd, argv: rest });
+		process.exit(r?.ok ? 0 : 1);
 	}
 	if (sub === "update") {
 		await runUpdate({ packageRoot, argv: rest });

@@ -3700,3 +3700,14 @@ routine (una passata senza stall è silenziosa) e alza SOLO le decisioni vere
 (stall), incluse le notifiche WhatsApp. Filtro di priorità in pura logica, nessun
 LLM extra, costruito sopra il watcher zero-token. Esteso
 `scripts/smoke-test-watch-stalls.mjs` per coprire away-mode.
+
+#### Ticket 10 — preflight credenziali + capability-probe (`po deps`)
+
+Introduce `po deps` (alias `provision`): probe read-only che verifica in modo
+deterministico (a) variabili `.env` attese (lettura `.env`, mai committato),
+(b) CLI (`which`), (c) auth CLI best-effort (es. `gh auth status`). Output:
+checklist tipizzata `ok`/`missing` con hint di installazione + oggetto
+machine-readable (`ok`/`results`/`missing`) che il planner passa come context
+a `decision_hold_create` (ticket 02) per chiedere wait-vs-async all'operatore
+prima di lanciare il team. Prompt planner aggiornato col flusso di preflight.
+Test: `scripts/smoke-test-po-deps.mjs`.

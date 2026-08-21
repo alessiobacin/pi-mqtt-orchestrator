@@ -4,7 +4,7 @@
 // (skills-vendor/mattpocock/, vedi VERSION.md lì dentro) — wayfinder,
 // to-spec, grilling, domain-modeling, setup-matt-pocock-skills.
 //
-// PERCHÉ QUESTO SCRIPT ESISTE (Revisione 22, vedi docs/mvp-notes.md):
+// PERCHÉ QUESTO SCRIPT ESISTE (Revisione 22, vedi docs/development-notes.md):
 // extensions/orchestrator.ts non compone MAI il comando che lancia un nuovo
 // processo `pi` — l'unico uso di execFile() nell'estensione è per le
 // chiamate di self-report/rename verso herdr e per `git` (vedi
@@ -147,44 +147,51 @@ export function runLaunchPlanner({ packageRoot, cwd, argv }) {
 	// scaffoldato da una versione di `po init` PRECEDENTE alla Revisione 33
 	// ha ancora una copia locale di extensions/orchestrator.ts sul disco
 	// (creata prima che create-project.mjs smettesse di copiarla). Quella
-	// copia stale continua a triggerare `hasLocalExtension` qui sopra, quindi
-	// il comando composto include ancora `-e extensions/orchestrator.ts` —
-	// che torna a duplicare ogni tool/flag se l'estensione è ANCHE installata
-	// globalmente (il caso normale), esattamente lo stesso traceback della
-	// Revisione 33 ("Tool ... conflicts with ...", "Flag ... conflicts with
-	// ..."), stavolta causato da un residuo di scaffold vecchio invece che da
-	// una scelta del codice. Euristica per distinguere questo caso dal
-	// legittimo "dentro il repo del pacchetto stesso, in sviluppo": il
-	// package.json del pacchetto ha sempre name === "pi-mqtt-orchestrator";
-	// un progetto scaffoldato da `po init` ha sempre uno slug diverso (viene
-	// da --name, vedi create-project.mjs). Non blocca l'avvio (potrebbe
-	// esserci un motivo legittimo non previsto) — stampa solo un avviso
-	// esplicito e concreto, con il comando pronto da copiare per risolvere.
-	if (hasLocalExtension) {
-		let cwdPkgName;
-		try {
-			cwdPkgName = JSON.parse(readFileSync(path.join(cwd, "package.json"), "utf-8")).name;
-		} catch {
-			cwdPkgName = undefined;
-		}
-		const looksLikePackageRepo = cwdPkgName === "pi-mqtt-orchestrator";
-		if (!looksLikePackageRepo) {
-			console.warn(
-				`launch-planner: ATTENZIONE — trovato "${orchestratorPath}" in un progetto che non sembra il repo del pacchetto stesso.\n` +
-					`Se l'estensione è ANCHE installata globalmente (pi extension install / npm install -g — il caso normale), questa copia\n` +
-					`locale verrà caricata ANCHE lei con -e, duplicando ogni tool/flag e facendo fallire pi con "Tool ... conflicts with ...".\n` +
-					`È quasi certamente un residuo di uno scaffold creato da una versione di \`po init\` precedente alla Revisione 33 (che non\n` +
-					`copia più extensions/ — vedi docs/mvp-notes.md). Se non stai sviluppando il pacchetto stesso, risolvi rimuovendo la cartella:\n` +
-					`  ${process.platform === "win32" ? "Remove-Item -Recurse -Force" : "rm -rf"} "${path.join(cwd, "extensions")}"\n` +
-					`poi rilancia \`po start\`.\n`,
-			);
-		}
+	// copia stale continua a triggerare `hasLocalExtension` qui sopra.
+	// Euristica per distinguere questo caso dal legittimo "dentro il repo del
+	// pacchetto stesso, in sviluppo": il package.json del pacchetto ha
+	// sempre name === "pi-mqtt-orchestrator"; un progetto scaffoldato da `po
+	// init` ha sempre uno slug diverso (viene da --name, vedi
+	// create-project.mjs).
+	let cwdPkgName;
+	try {
+		cwdPkgName = JSON.parse(readFileSync(path.join(cwd, "package.json"), "utf-8")).name;
+	} catch {
+		cwdPkgName = undefined;
+	}
+	const looksLikePackageRepo = cwdPkgName === "pi-mqtt-orchestrator";
+
+	// Revisione 38 — bug reale trovato in produzione (docs/development-notes.md,
+	// Revisione 38): fino a qui questo script si limitava ad AVVISARE del
+	// rischio di conflitto ("Tool ... conflicts with ...") ma continuava
+	// comunque a comporre `-e extensions/orchestrator.ts` anche nel caso
+	// stale — l'avviso descriveva correttamente il crash imminente invece di
+	// evitarlo. Un operatore che ha visto esattamente quell'avviso ha
+	// comunque avuto il crash subito dopo, sia con `po start` che con `pi -e
+	// extensions/orchestrator.ts --role planner` a mano. Fix: quando la
+	// copia locale NON è dentro il repo del pacchetto stesso, ignorala del
+	// tutto — non passare mai `-e` per lei, confida SEMPRE sull'auto-load
+	// globale in quel caso (esattamente come per un progetto senza copia
+	// locale affatto). L'unico caso in cui `-e` viene ancora composto è lo
+	// sviluppo del pacchetto stesso (packageRoot === cwd, verificato via
+	// package.json name).
+	if (hasLocalExtension && !looksLikePackageRepo) {
+		console.warn(
+			`launch-planner: trovato "${orchestratorPath}" residuo, ma IGNORATO (non aggiunto a -e) — è quasi certamente\n` +
+				`un residuo di uno scaffold creato da una versione di \`po init\` precedente alla Revisione 33 (che non copia\n` +
+				`più extensions/ — vedi docs/development-notes.md). L'estensione installata globalmente (pi extension install /\n` +
+				`npm install -g) viene usata al suo posto, come per qualunque altro progetto scaffoldato di recente — questa\n` +
+				`cartella residua è ormai inerte e sicura da cancellare quando vuoi:\n` +
+				`  ${process.platform === "win32" ? "Remove-Item -Recurse -Force" : "rm -rf"} "${path.join(cwd, "extensions")}"\n`,
+		);
 	}
 
 	const skillFlags = resolveSkillPaths(packageRoot).flatMap((p) => ["--skill", p]);
-	// -e esplicito solo se c'è davvero una copia locale (dev mode / progetto
-	// legacy) — altrimenti l'estensione installata globalmente basta da sola.
-	const extensionFlags = hasLocalExtension ? ["-e", "extensions/orchestrator.ts"] : [];
+	// -e esplicito SOLO in sviluppo del pacchetto stesso (looksLikePackageRepo)
+	// — mai per una copia locale residua in un progetto scaffoldato, anche se
+	// esiste sul disco (vedi Revisione 38 sopra): l'estensione installata
+	// globalmente basta sempre da sola in quel caso.
+	const extensionFlags = hasLocalExtension && looksLikePackageRepo ? ["-e", "extensions/orchestrator.ts"] : [];
 	const piArgs = [...extensionFlags, ...passthrough, "--role", "planner", ...skillFlags];
 
 	const printable = ["pi", ...piArgs].map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");

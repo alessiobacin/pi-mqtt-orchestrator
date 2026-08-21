@@ -52,6 +52,9 @@ jobs:
       - name: check-skill-isolation (mattpocock skills wired ONLY to planner)
         run: npm run check-skill-isolation
 
+      - name: launch-planner legacy-scaffold handling (stale extensions/ never re-added to -e)
+        run: node scripts/smoke-test-launch-planner-legacy.mjs
+
       - name: Smoke tests (transport / pipeline / worktree / coordination / etc.)
         run: |
           node scripts/smoke-test.mjs
@@ -73,17 +76,8 @@ jobs:
           node --experimental-strip-types scripts/smoke-test-response-wakeup.mjs
           node --experimental-strip-types scripts/smoke-test-worktree-cwd-guard.mjs
           node --experimental-strip-types scripts/smoke-test-ticket-engine.mjs
-          node --experimental-strip-types scripts/smoke-test-approval-gate.mjs
-          node --experimental-strip-types scripts/smoke-test-control-plane.mjs
-          node --experimental-strip-types scripts/smoke-test-reconciliation.mjs
-          node --experimental-strip-types scripts/smoke-test-team-per-instance.mjs
           node --experimental-strip-types scripts/smoke-test-project-scoping.mjs
           node --experimental-strip-types scripts/smoke-test-end-project.mjs
-          node --experimental-strip-types scripts/smoke-test-watch-stalls.mjs
-          node --experimental-strip-types scripts/smoke-test-po-status.mjs
-          node --experimental-strip-types scripts/smoke-test-po-deps.mjs
-          node --experimental-strip-types scripts/smoke-test-gantt.mjs
-          node --experimental-strip-types scripts/smoke-test-planning-flow.mjs
           node --experimental-strip-types scripts/e2e-full-flow.mjs
 
       - name: po CLI smoke test (init in place + start --print-only, via a real global install)

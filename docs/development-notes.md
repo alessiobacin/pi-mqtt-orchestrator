@@ -6,6 +6,69 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 39 — bug reale: la protezione anti-doppio-caricamento (Revisione 34/35) avvisava del crash imminente invece di evitarlo
+
+**Incidente reale, riportato subito dopo la consegna della Revisione 38**:
+l'operatore ha lanciato il planner in `moa-test-project` — sia con `po start
+--instance planner-01` sia con `pi -e extensions/orchestrator.ts --instance
+planner-01 --role planner` a mano — e ha ricevuto lo stesso identico
+traceback della Revisione 33 (`Tool "agent_list" conflicts with
+.../moa-test-project/extensions/orchestrator.ts`, ripetuto per ogni tool e
+flag, poi `Hint: Start without extensions using "pi -ne"`).
+
+**Causa reale — un bug genuino in `scripts/launch-planner.mjs`, non un
+problema della cartella dell'operatore.** La Revisione 34/35 aveva
+aggiunto un rilevamento per questo esatto scenario (una copia locale stale
+di `extensions/orchestrator.ts` in un progetto scaffoldato prima della
+Revisione 33) — ma quel rilevamento si limitava a stampare un AVVISO
+("questa copia locale verrà caricata ANCHE lei con -e, duplicando ogni
+tool/flag") e poi, subito dopo, componeva comunque il comando CON `-e
+extensions/orchestrator.ts` — la variabile `looksLikePackageRepo`, calcolata
+apposta per distinguere questo caso, veniva usata SOLO per decidere se
+stampare l'avviso, mai per decidere se includere `-e`. Il codice descriveva
+correttamente il crash imminente invece di evitarlo — verificato leggendo
+`extensionFlags = hasLocalExtension ? ["-e", "extensions/orchestrator.ts"] :
+[]`, che ignorava del tutto `looksLikePackageRepo`.
+
+**Fix**: `extensionFlags` ora richiede ENTRAMBE le condizioni —
+`hasLocalExtension && looksLikePackageRepo` — non più solo la prima. Una
+copia locale stale in un progetto scaffoldato (non il repo del pacchetto
+stesso) non viene più mai passata a `-e`: il comando composto si affida
+sempre all'estensione installata globalmente in quel caso, esattamente come
+per un progetto scaffoldato di recente senza copia locale affatto.
+L'avviso resta (informativo, non più un preannuncio di crash) ma con testo
+aggiornato: la cartella residua è dichiarata esplicitamente "IGNORATA" e
+"sicura da cancellare quando vuoi", non più un problema da risolvere prima
+di procedere.
+
+**Verificato**: nuovo `scripts/smoke-test-launch-planner-legacy.mjs` (8
+asserzioni) — lancia per davvero `scripts/launch-planner.mjs` come child
+process (mai un mirror) in tre scenari reali: scaffold legacy con una copia
+stale reale di `extensions/orchestrator.ts` (package.json con uno slug
+diverso da quello del pacchetto — replica esatta della cartella
+dell'operatore) → conferma che il comando composto NON include più `-e` e
+che l'avviso dichiara la cartella ignorata/sicura da cancellare; repo del
+pacchetto stesso in sviluppo (`package.json` con `name ===
+"pi-mqtt-orchestrator"`) → conferma che `-e` continua a essere incluso
+correttamente, nessun avviso spurio; scaffold moderno senza copia locale →
+invariato. Suite esistente (13 smoke test + 3 file `--experimental-strip-types`
+aggiuntivi della Revisione 38 + `e2e-full-flow.mjs` + `check-skill-isolation`)
+riverificata verde.
+
+**Limite onesto**: questo fix copre solo l'invocazione tramite `po
+start`/`scripts/launch-planner.mjs`. Se l'operatore lancia `pi -e
+extensions/orchestrator.ts --role planner` A MANO (bypassando lo script) in
+una cartella con una copia locale stale e l'estensione ANCHE installata
+globalmente, il conflitto si verifica ancora — non c'è modo per questo
+progetto di intercettare un'invocazione diretta di `pi`. L'unica soluzione
+in quel caso resta cancellare la cartella `extensions/` residua (ora
+esplicitamente segnalata come sicura da cancellare, invece che come un
+problema da capire).
+
+Dettagli completi (changelog riga per riga) in questo stesso paragrafo —
+nessun file ulteriore da consultare, il fix tocca solo
+`scripts/launch-planner.mjs` e il nuovo test.
+
 ## Revisione 38 — MQTT scoping automatico per progetto, skill del planner robuste al metodo di lancio, `po end`
 
 Tre segnalazioni reali dall'operatore, dopo aver usato herdr per lanciare un
@@ -3624,121 +3687,3 @@ Se preferisci una GUI: [MQTT Explorer](https://mqttexplorer.com/) —
 `brew install --cask mqtt-explorer` — connessione a host `localhost`, porta
 `1883`, nessun TLS, nessuna credenziale (il broker di sviluppo accetta
 connessioni anonime), topic di sottoscrizione lasciato al default `#`.
-
-### Revisione 39 — Nuovi ticket dell'ottimizzazione impl (wayfinder map `optimize-orchestrator`)
-
-Questa sezione documenta le implementazioni dei ticket della mappa
-`.scratch/optimize-orchestrator/` man mano che vengono svolti, ognuna con il
-proprio smoke test e2e reale.
-
-#### Ticket 02 — gate di approvazione umana durevole (`decision_hold_*`)
-
-Pattern decision-hold di firstmate: un hold è una riga SQLite che sopravvive ai
-riavvii (mai "il planner se lo ricorda") e si chiude una sola volta con una
-decisione esplicita registrata (`decision_hold_resolve`). Strumenti:
-`decision_hold_create` (solo planner), `decision_hold_list`, `decision_hold_resolve`.
-Gli holds aperti sono esposti in `run_status` come `open_holds`. Test:
-`scripts/smoke-test-approval-gate.mjs`.
-
-Uso tipico: preflight credenziali — il planner apre un hold ("fornisci ora o in
-parallelo?"), l'operatore risponde, il planner registra la decisione. Un hold
-aperto che blocca lavoro dipendente non va ignorato.
-
-#### Ticket 06 — riconciliazione all'avvio (idempotente, no auto-requeue)
-
-Un planner fresco, poco dopo essersi connesso (default `PI_ORCH_RECONCILE_DELAY_MS`
-= 1500ms), esegue una passata deterministica su questo progetto: dai ticket
-`running` + presenza MQTT dal vivo deriva (1) i ticket "dangling" il cui
-assegnatario non è più live e (2) gli hold di approvazione ancora aperti, e li
-registra come checkpoint/evento `reconcile_sweep`. NON auto-cancella né
-riassegna (contratto di resumability Revisione 26): espone i fatti per la
-prossima decisione del planner. `run_status` ora include anche i `checkpoints`.
-Test: `scripts/smoke-test-reconciliation.mjs`.
-
-#### Ticket 13 — team per istanza planner
-
-Confermato che un planner non è obbligato al team del planner-01: `resolveCapabilities`
-risolve `teams` per istanza (INSTANCE aggiunge al ROLE default da `agents.yaml`)
-e i topic `pi/<project>/teams/<team>/events` sono per-progetto.
-`po start`/`launch-planner.mjs` NON forzano un team unico — compongono solo i flag
-`--skill`. Test: `scripts/smoke-test-team-per-instance.mjs`.
-
-#### Tickets 01 + 03 — control plane allow-list (`agent_control`)
-
-Introdotto `agent_control`, tool di controllo SEPARATO dal data plane
-(`agent_send`). Accetta solo un set allow-listed di verbi (`launch`/`interrupt`/
-`relaunch`/`status`), mai testo/keys liberi. I verbi che pilotano un processo
-(`launch`/`interrupt`/`relaunch`) sono planner-only e richiedono che il binary di
-destinazione sia allow-listed per quel verbo. L'allow-list è configurabile in
-`config/control.json` (default in `DEFAULT_CONTROL_ALLOWLIST`); `status` è
-read-only per ogni ruolo. Test: `scripts/smoke-test-control-plane.mjs`.
-
-#### Ticket 04 — watcher zero-token (`po watch`, scripts/watch-stalls.mjs)
-
-Sorvegliatore degli stall DETACHED da qualsiasi sessione `pi`: puro Node+sqlite+mqtt,
-mai un LLM. Ogni `--once` (o con `--interval-ms` per loop) interroga orchestrator.db
-per i ticket `running` oltre soglia (`--stall-ms`, default 15 min) e per ciascuno:
-pubblica `ticket_stalled` sul topic eventi del run, appende un marker JSONL nelle
-log del workspace, e (se `.env` configurato) invia un tripwire WhatsApp. NON giudica
-(scelto: solo surfacing) né muta stato — la decisione operativa resta del planner
-(contratto di resumability). Complementare e non sostitutivo del watchdog in-process
-(Revisione 29). Test: `scripts/smoke-test-watch-stalls.mjs`.
-
-#### Ticket 12 — CLI po read-only: status / logs / fleet / mcp / skills / doctor --network
-
-Aggiunti a `po` (delegati a `scripts/po-status.mjs`, tutti read-only) per
-operare senza aprire una sessione `pi`: `po status` (run/ticket da SQLite),
-`po logs [instance]` (tail JSONL), `po fleet` (presence retained dal broker),
-`po mcp` / `po skills` (declaration yaml per ruolo/istanza),
-`po doctor --network` (raggiungibilità broker + git + pi). Test:
-`scripts/smoke-test-po-status.mjs`.
-
-#### Ticket 07 — away-mode leggero
-
-`po watch --away` (o env `PI_ORCH_AWAY=1`): il watcher assorbe il rumore di
-routine (una passata senza stall è silenziosa) e alza SOLO le decisioni vere
-(stall), incluse le notifiche WhatsApp. Filtro di priorità in pura logica, nessun
-LLM extra, costruito sopra il watcher zero-token. Esteso
-`scripts/smoke-test-watch-stalls.mjs` per coprire away-mode.
-
-#### Ticket 10 — preflight credenziali + capability-probe (`po deps`)
-
-Introduce `po deps` (alias `provision`): probe read-only che verifica in modo
-deterministico (a) variabili `.env` attese (lettura `.env`, mai committato),
-(b) CLI (`which`), (c) auth CLI best-effort (es. `gh auth status`). Output:
-checklist tipizzata `ok`/`missing` con hint di installazione + oggetto
-machine-readable (`ok`/`results`/`missing`) che il planner passa come context
-a `decision_hold_create` (ticket 02) per chiedere wait-vs-async all'operatore
-prima di lanciare il team. Prompt planner aggiornato col flusso di preflight.
-Test: `scripts/smoke-test-po-deps.mjs`.
-
-#### Ticket 05 — segnali semantici per-harness
-
-L'estensione ora aggancia `tool_execution_start` di Pi e scrive un marcatore nel
-log JSONL dell'istanza (appendEntry = non va mai al LLM). Lo stall watcher
-(`po watch`) legge quei marcatori: un task `running` il cui assegnatario ha un
-`tool_execution_start` recente viene classificato come "probabile lento, non
-bloccato", altrimenti "possibile turno bloccato" (il caso Revisione 29) — senza
-consumare alcun token LLM. Test: `scripts/smoke-test-watch-stalls.mjs`
-(13 assert, ora include semantic liveness + away-mode).
-
-#### Ticket 11 — Gantt live web (`po gantt` / `po web`)
-
-Web app self-contained (Node http + WebSocket upgrade manuale, zero dipendenze
-npm) che serve la vista a timeline dello stato di orchestrazione: leggenda per
-stato ticket (done/running/pending/blocked/failed), ownership, e decision holds
-aperte. HTTP `/healthz`, `/data` (snapshot JSON da SQLite), `/`, e `/ws`
-(broadcast live del snapshot su evento MQTT della run). Read-only. Test:
-`scripts/smoke-test-gantt.mjs` (9 assert).
-
-#### Ticket 08 + 09 — flusso planning Matt Pocock close + ricerca web nel planner
-
-- Ticket 08: il prompt del planner ora chiude esplicitamente il flusso
-  wayfinder/to-spec -> to-tickets -> layer ticket/DAG: "to-tickets" non è una
-  skill vendored, è il passo in cui il planner scrive un file per ticket sotto
-  `.scratch/<task>/tickets/` E registra lo stesso piano con `ticket_create`.
-- Ticket 09: nuova `prompts/research-guide.md` consultata dal planner per i task
-  che lo meritano (progetti simili da riusare, tooling migliore per ruolo),
-  con il flusso in 6 step e il fallback onesto quando manca un tool web — la
-  ricerca resta opzionale ed è ridotta/saltata per task banali o non-dev.
-- Test: `scripts/smoke-test-planning-flow.mjs` (8 assert, content/isolation).

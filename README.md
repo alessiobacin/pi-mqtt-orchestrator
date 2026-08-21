@@ -69,37 +69,9 @@ po uninstall        # remove the global installation (asks for confirmation; add
 
 `po update` updates both places the extension can live: the global npm package (`npm install -g` against this repo's GitHub URL) and, if present, the separate clone `pi extension install` keeps under `~/.pi/agent/git/github.com/<owner>/<repo>` (a plain `git pull`). `po uninstall` removes both the same way, asking a separate confirmation for the second one.
 
-**If you scaffolded a project with an older `po init`** (one that still copied `extensions/` into new projects), that project directory may have its own leftover `extensions/orchestrator.ts`. `po start` will warn you if it finds one outside this package's own repo — delete that folder (`rm -rf extensions` / `Remove-Item -Recurse -Force extensions`) and re-run `po start`; it's no longer needed once the extension is installed globally.
+**If you scaffolded a project with an older `po init`** (one that still copied `extensions/` into new projects), that project directory may have its own leftover `extensions/orchestrator.ts`. `po start` detects this and simply ignores it, relying on the globally-installed extension instead — it prints a note pointing this out, but the leftover folder no longer causes `pi` to fail with `Tool "..." conflicts with ...`/`Flag "..." conflicts with ...` (a real bug in that detection, fixed — it used to warn about the impending crash and then cause it anyway). The folder is inert at that point; delete it whenever convenient (`rm -rf extensions` / `Remove-Item -Recurse -Force extensions`) — nothing needs it once the extension is installed globally.
 
 **If you scaffolded a project before this change**, its root-level `reports/`, `prompts/`, and `logs/` folders (development artifacts of working with this extension — task reports, role prompts, per-instance debug traces) were tracked by git like any other file, right alongside your actual application code. As of `po init --llmp`/plain `po init`, all three now live under the already-gitignored `.pi/extensions/multiAgentOrchestrator/` instead, so they never end up in a public push by default. Nothing migrates automatically for an existing project — if you want the same treatment there, `git rm -r --cached reports prompts logs` (whichever exist) and move their contents under `.pi/extensions/multiAgentOrchestrator/{reports,prompts,logs}` by hand; if any of them were already pushed to a public remote, removing them from tracking going forward does not erase that history — see `docs/development-notes.md`, Revisione 37, if you need to scrub it from a remote that's already public.
-
-### Observing and operating a project (read-only, no session needed)
-
-```bash
-po status                    # run/ticket state of this project (SQLite)
-po status --run <run_id>     # detail for one run
-po logs [instance]           # tail an instance's debug JSONL log
-po fleet                     # list live agents from the broker (retained presence)
-po mcp [role] / po skills [role]   # declared MCP/skills per role/instance
-po doctor --network          # broker reachability + git + pi
-po gantt --open              # live Gantt web view of the orchestration
-po deps --cli gh,docker --env TOKEN   # capability-probe: what's present vs missing
-```
-
-All of these are read-only — they never touch tickets, worktrees, or files.
-`po gantt` also streams runs' MQTT events live so the timeline updates as the
-team works.
-
-### Zero-token stall watcher & away-mode
-
-```bash
-po watch --once                    # detect running tickets stuck past the stall threshold
-po watch                           # keep watching (loop); publishes ticket_stalled on MQTT
-po watch --away                    # absorb routine 'no stall' passes, escalate only real stalls
-```
-
-The watcher is pure Node + sqlite + MQTT — it never spends LLM tokens, and it
-only surfaces (never judges or mutates) stalls; the planner decides what to do.
 
 ### Closing out a project
 

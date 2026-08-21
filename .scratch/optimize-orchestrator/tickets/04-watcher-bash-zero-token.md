@@ -23,3 +23,5 @@ planner sul canale `[watchdog]` già esistente (Revisione 29). Singleton via loc
 ## Dipendenze
 
 - Consumato dall'away-mode (ticket 09) come router notifiche.
+
+Status: implemented + tested OK

@@ -22,3 +22,5 @@ retained MQTT.
 ## Dipendenze
 
 - Sopra il layer ticket/DAG SQLite esistente.
+
+Status: implemented + tested OK

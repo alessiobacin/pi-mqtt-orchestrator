@@ -25,3 +25,5 @@ ai riavvii.
 ## Dipendenze
 
 - Nessuna per la parte di struttura; consumato da tickets 06/13 (preflight).
+
+Status: implemented + tested OK

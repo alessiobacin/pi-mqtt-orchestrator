@@ -23,3 +23,5 @@ con team diversi che non si "vedono" in topic di team diversi, e assicurarsi che
 ## Dipendenze
 
 - Nessuna strutturale.
+
+Status: implemented + tested OK

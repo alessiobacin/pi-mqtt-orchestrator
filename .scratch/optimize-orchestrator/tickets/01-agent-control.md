@@ -28,3 +28,5 @@ applicabile, passando sotto questo gate.
 ## Dipendenze
 
 - Nessuna (può partire in parallelo con gli altri ticket di hardening).
+
+Status: implemented + tested OK

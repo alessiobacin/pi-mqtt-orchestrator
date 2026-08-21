@@ -23,3 +23,5 @@ wrapper/script, non lasciata alla disciplina del prompt.
 
 - Si appoggia a `agent_control` (ticket 01) per il routing dei comandi dove
   applicabile.
+
+Status: implemented + tested OK

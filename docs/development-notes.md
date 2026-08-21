@@ -3721,3 +3721,12 @@ log JSONL dell'istanza (appendEntry = non va mai al LLM). Lo stall watcher
 bloccato", altrimenti "possibile turno bloccato" (il caso Revisione 29) — senza
 consumare alcun token LLM. Test: `scripts/smoke-test-watch-stalls.mjs`
 (13 assert, ora include semantic liveness + away-mode).
+
+#### Ticket 11 — Gantt live web (`po gantt` / `po web`)
+
+Web app self-contained (Node http + WebSocket upgrade manuale, zero dipendenze
+npm) che serve la vista a timeline dello stato di orchestrazione: leggenda per
+stato ticket (done/running/pending/blocked/failed), ownership, e decision holds
+aperte. HTTP `/healthz`, `/data` (snapshot JSON da SQLite), `/`, e `/ws`
+(broadcast live del snapshot su evento MQTT della run). Read-only. Test:
+`scripts/smoke-test-gantt.mjs` (9 assert).

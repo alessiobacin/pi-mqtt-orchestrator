@@ -47,6 +47,7 @@ import { runEndProject } from "../scripts/end-project.mjs";
 import { runWatch } from "../scripts/watch-stalls.mjs";
 import { runPoStatus } from "../scripts/po-status.mjs";
 import { runPoDeps } from "../scripts/po-deps.mjs";
+import { runGantt } from "../scripts/gantt-server.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -72,6 +73,7 @@ function printTopUsage() {
 			'  skills [role]    Skill per ruolo/istanza dichiarate — read-only',
 			'  doctor --network Verifica raggiungibilità broker + git + pi — read-only',
 			'  deps [opzioni]    Capability-probe: credenziali .env + cli + auth presenti? (read-only)',
+			'  gantt [opzioni]   Vista gantt live web dell\'orchestrazione — `po gantt --open`',
 			"",
 			"  --version, -v    Stampa la versione del pacchetto installato",
 			"  --help, -h       Mostra questo messaggio",
@@ -118,6 +120,10 @@ async function main() {
 	if (sub === "deps" || sub === "provision") {
 		const r = await runPoDeps({ cwd, argv: rest });
 		process.exit(r?.ok ? 0 : 1);
+	}
+	if (sub === "gantt" || sub === "web") {
+		await runGantt({ cwd, argv: rest, packageRoot });
+		return;
 	}
 	if (sub === "update") {
 		await runUpdate({ packageRoot, argv: rest });

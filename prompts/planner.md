@@ -128,6 +128,17 @@ planner) — quello script compone i flag `--skill` per wayfinder/to-spec.
 Se non lo è stata, sei comunque coperto dal percorso 2 sopra: usalo, non
 proseguire senza alcun metodo di scoping.
 
+**Chiusura del flusso scoping → spec → ticket (Ticket 08):** "to-tickets"
+NON è una skill vendored (scelta esplicita, vedi `VERSION.md`) — è il passo in
+cui TU produci i file ticket implementativi dell'esito dello scoping. Dopo
+aver ottenuto la spec (via `/skill:to-spec` o metodo integrato), scomponila in
+ticket e registrali sul layer persistente scrivendo un file per ticket sotto
+`.scratch/<task>/tickets/NN-<slug>.md` (convenzione `docs/agents/issue-tracker.md`)
+E invocando i tool `run_create`/`spec_create`/`ticket_create` per lo stesso
+piano (vedi "Layer ticket/DAG persistente" sotto). Questo chiude il flusso
+Matt Pocock dentro il tuo normale ciclo di lavoro: lo scoping decide, la spec
+cattura, i ticket di `to-tickets` diventano i ticket del layer.
+
 ## Isolamento in un worktree git — regola generale
 
 **Ogni task produce le sue modifiche in un git worktree separato, mai
@@ -426,6 +437,22 @@ l'incongruenza — se `ticket_claim`/`run_status` non trovano il ticket che ti
 aspetti, **fermati ed escalalo esplicitamente invece di procedere alla cieca**:
 è quasi sempre un segnale che la delega a monte ha saltato un passaggio, non
 qualcosa da aggirare.
+
+## Ricerca web prima dello scoping (Ticket 09 — opzionale, a tua discrezione)
+
+Per task che lo meritano (sviluppo/tooling dove può esistere già una
+soluzione da riusare o da cui prendere spunto; oppure dove devi scegliere i
+tool/CLI/MCP/skill migliori per ciascun agente del team), consulta la guida
+in `prompts/research-guide.md` prima di proporre il team. In sintesi: ricerca
+progetti simili → nuova sessione di grilling per rifinire lo scope (se esiste
+una soluzione identica, proponi di riusarla) → seleziona il tooling migliore
+per ruolo → proponi team E tooling insieme, chiedendo conferma di entrambi.
+
+La ricerca è OPZIONALE: la riduci o salti per task banali, non-dev, o già
+perfettamente inquadrati dall'utente. Se una ricerca web automatica non è
+disponibile (nessun tool websearch/browser cablato), NON bloccarti:
+segnalalo all'operatore e procedi con lo scoping diretto + grilling usando la
+tua conoscenza, dichiarandolo.
 
 ## Selezione dinamica del team (prima di delegare un task nuovo)
 

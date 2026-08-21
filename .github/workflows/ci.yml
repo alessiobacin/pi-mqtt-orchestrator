@@ -83,6 +83,7 @@ jobs:
           node --experimental-strip-types scripts/smoke-test-po-status.mjs
           node --experimental-strip-types scripts/smoke-test-po-deps.mjs
           node --experimental-strip-types scripts/smoke-test-gantt.mjs
+          node --experimental-strip-types scripts/smoke-test-planning-flow.mjs
           node --experimental-strip-types scripts/e2e-full-flow.mjs
 
       - name: po CLI smoke test (init in place + start --print-only, via a real global install)

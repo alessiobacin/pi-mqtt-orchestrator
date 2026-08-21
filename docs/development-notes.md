@@ -3730,3 +3730,15 @@ stato ticket (done/running/pending/blocked/failed), ownership, e decision holds
 aperte. HTTP `/healthz`, `/data` (snapshot JSON da SQLite), `/`, e `/ws`
 (broadcast live del snapshot su evento MQTT della run). Read-only. Test:
 `scripts/smoke-test-gantt.mjs` (9 assert).
+
+#### Ticket 08 + 09 — flusso planning Matt Pocock close + ricerca web nel planner
+
+- Ticket 08: il prompt del planner ora chiude esplicitamente il flusso
+  wayfinder/to-spec -> to-tickets -> layer ticket/DAG: "to-tickets" non è una
+  skill vendored, è il passo in cui il planner scrive un file per ticket sotto
+  `.scratch/<task>/tickets/` E registra lo stesso piano con `ticket_create`.
+- Ticket 09: nuova `prompts/research-guide.md` consultata dal planner per i task
+  che lo meritano (progetti simili da riusare, tooling migliore per ruolo),
+  con il flusso in 6 step e il fallback onesto quando manca un tool web — la
+  ricerca resta opzionale ed è ridotta/saltata per task banali o non-dev.
+- Test: `scripts/smoke-test-planning-flow.mjs` (8 assert, content/isolation).

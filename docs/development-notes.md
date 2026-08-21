@@ -3624,3 +3624,41 @@ Se preferisci una GUI: [MQTT Explorer](https://mqttexplorer.com/) —
 `brew install --cask mqtt-explorer` — connessione a host `localhost`, porta
 `1883`, nessun TLS, nessuna credenziale (il broker di sviluppo accetta
 connessioni anonime), topic di sottoscrizione lasciato al default `#`.
+
+### Revisione 39 — Nuovi ticket dell'ottimizzazione impl (wayfinder map `optimize-orchestrator`)
+
+Questa sezione documenta le implementazioni dei ticket della mappa
+`.scratch/optimize-orchestrator/` man mano che vengono svolti, ognuna con il
+proprio smoke test e2e reale.
+
+#### Ticket 02 — gate di approvazione umana durevole (`decision_hold_*`)
+
+Pattern decision-hold di firstmate: un hold è una riga SQLite che sopravvive ai
+riavvii (mai "il planner se lo ricorda") e si chiude una sola volta con una
+decisione esplicita registrata (`decision_hold_resolve`). Strumenti:
+`decision_hold_create` (solo planner), `decision_hold_list`, `decision_hold_resolve`.
+Gli holds aperti sono esposti in `run_status` come `open_holds`. Test:
+`scripts/smoke-test-approval-gate.mjs`.
+
+Uso tipico: preflight credenziali — il planner apre un hold ("fornisci ora o in
+parallelo?"), l'operatore risponde, il planner registra la decisione. Un hold
+aperto che blocca lavoro dipendente non va ignorato.
+
+#### Ticket 06 — riconciliazione all'avvio (idempotente, no auto-requeue)
+
+Un planner fresco, poco dopo essersi connesso (default `PI_ORCH_RECONCILE_DELAY_MS`
+= 1500ms), esegue una passata deterministica su questo progetto: dai ticket
+`running` + presenza MQTT dal vivo deriva (1) i ticket "dangling" il cui
+assegnatario non è più live e (2) gli hold di approvazione ancora aperti, e li
+registra come checkpoint/evento `reconcile_sweep`. NON auto-cancella né
+riassegna (contratto di resumability Revisione 26): espone i fatti per la
+prossima decisione del planner. `run_status` ora include anche i `checkpoints`.
+Test: `scripts/smoke-test-reconciliation.mjs`.
+
+#### Ticket 13 — team per istanza planner
+
+Confermato che un planner non è obbligato al team del planner-01: `resolveCapabilities`
+risolve `teams` per istanza (INSTANCE aggiunge al ROLE default da `agents.yaml`)
+e i topic `pi/<project>/teams/<team>/events` sono per-progetto.
+`po start`/`launch-planner.mjs` NON forzano un team unico — compongono solo i flag
+`--skill`. Test: `scripts/smoke-test-team-per-instance.mjs`.

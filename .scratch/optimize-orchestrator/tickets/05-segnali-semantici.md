@@ -23,3 +23,4 @@ combinata con heartbeat "working". Soglia di tempo resta come fallback, non unic
 ## Dipendenze
 
 - Si integra con il watcher bash (ticket 04).
+Status: implemented + tested OK

@@ -27,3 +27,4 @@ script in `scripts/`, output coerente e cross-platform, testabile da CLI.
 
 - `gantt`/`web` → ticket 11; `deps`/`provision` → ticket 10; `fleet` → agent_list
   già presente; `logs` → directory logs esistente.
+Status: implemented + tested OK

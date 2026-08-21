@@ -25,3 +25,4 @@ saltata (decisione del planner). Se il prompt cresce troppo, estrarre la guida i
 ## Dipendenze
 
 - Su ticket 08 (flusso planning); produce input per preflight (ticket 10).
+Status: implemented + tested OK

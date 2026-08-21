@@ -22,3 +22,4 @@ pesante.
 ## Dipendenze
 
 - Usa il layer ticket/DAG SQLite e gli eventi MQTT esistenti.
+Status: implemented + tested OK

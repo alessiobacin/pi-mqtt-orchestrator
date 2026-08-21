@@ -27,3 +27,4 @@ anche il documento esaustivo delle cose da fare, elencate una a una.
 
 - Gate human_approval (ticket 02); CLI po (ticket 13 di po); ricerca web (ticket
   09) per i tool migliori.
+Status: implemented + tested OK

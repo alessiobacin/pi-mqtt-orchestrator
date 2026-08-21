@@ -22,3 +22,4 @@ WhatsApp. Filtro in pura logica (bash/regole), nessun LLM extra.
 ## Dipendenze
 
 - Watcher bash (ticket 04); integrate with notifiche WhatsApp esistenti.
+Status: implemented + tested OK

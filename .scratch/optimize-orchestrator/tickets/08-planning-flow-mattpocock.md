@@ -25,3 +25,4 @@ produce i file ticket (es. in `.scratch/<task>/tickets/`).
 ## Dipendenze
 
 - Nessuna strutturale; foundation per ricerca web (ticket 09).
+Status: implemented + tested OK

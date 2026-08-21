@@ -3683,3 +3683,12 @@ log del workspace, e (se `.env` configurato) invia un tripwire WhatsApp. NON giu
 (scelto: solo surfacing) né muta stato — la decisione operativa resta del planner
 (contratto di resumability). Complementare e non sostitutivo del watchdog in-process
 (Revisione 29). Test: `scripts/smoke-test-watch-stalls.mjs`.
+
+#### Ticket 12 — CLI po read-only: status / logs / fleet / mcp / skills / doctor --network
+
+Aggiunti a `po` (delegati a `scripts/po-status.mjs`, tutti read-only) per
+operare senza aprire una sessione `pi`: `po status` (run/ticket da SQLite),
+`po logs [instance]` (tail JSONL), `po fleet` (presence retained dal broker),
+`po mcp` / `po skills` (declaration yaml per ruolo/istanza),
+`po doctor --network` (raggiungibilità broker + git + pi). Test:
+`scripts/smoke-test-po-status.mjs`.

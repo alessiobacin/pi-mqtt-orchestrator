@@ -45,6 +45,7 @@ import { runUpdate } from "../scripts/update.mjs";
 import { runUninstall } from "../scripts/uninstall.mjs";
 import { runEndProject } from "../scripts/end-project.mjs";
 import { runWatch } from "../scripts/watch-stalls.mjs";
+import { runPoStatus } from "../scripts/po-status.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -63,6 +64,12 @@ function printTopUsage() {
 			"  uninstall [--yes] Rimuove l'installazione globale",
 			'  end [opzioni]    Chiude i run "active" del progetto nella directory corrente — `po end --help`',
 			'  watch [opzioni]  Sorvegliatore zero-token degli stall ticket — `po watch --once --help`',
+			'  status           Stato run/ticket del progetto (SQLite) — read-only',
+			'  logs [instance]  Ultime righe del log JSONL di un\'istanza — read-only',
+			'  fleet            Lista agenti live dal broker (retained presence) — read-only',
+			'  mcp [role]       Server/ruoli MCP dichiarati — read-only',
+			'  skills [role]    Skill per ruolo/istanza dichiarate — read-only',
+			'  doctor --network Verifica raggiungibilità broker + git + pi — read-only',
 			"",
 			"  --version, -v    Stampa la versione del pacchetto installato",
 			"  --help, -h       Mostra questo messaggio",
@@ -95,8 +102,16 @@ async function main() {
 		return;
 	}
 	if (sub === "doctor") {
+		if (rest[0] === "--network") {
+			const { ok } = await runPoStatus({ cwd, argv: ["doctor", "--network"] });
+			process.exit(ok ? 0 : 1);
+		}
 		const { ok } = await runDoctor({ cwd });
 		process.exit(ok ? 0 : 1);
+	}
+	if (sub === "status" || sub === "logs" || sub === "fleet" || sub === "mcp" || sub === "skills") {
+		await runPoStatus({ cwd, argv: [sub, ...rest] });
+		return;
 	}
 	if (sub === "update") {
 		await runUpdate({ packageRoot, argv: rest });

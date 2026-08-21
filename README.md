@@ -16,7 +16,11 @@ Everything communicates over a local MQTT broker, using role/instance identity a
 - **Role-based multi-agent coordination** over MQTT 5 — planner, coder, reviewer, and 23 optional specialist roles (TDD, mutation testing, security review, Kubernetes, CI/CD, accessibility, documentation sync, architecture diagrams, and more)
 - **Git worktree isolation** — every task runs in its own worktree; your main branch is only ever touched by a clean, reviewed merge
 - **A persistent ticket/DAG layer** (SQLite-backed) that tracks runs, specs, and tickets across restarts
-- **A watchdog** that detects stalled tickets and automatically escalates them
+- **A watchdog** that detects stalled tickets, runs that finished all their tickets but were never merged/notified, *and* tickets whose assigned instance has confirmably vanished (offline presence, not just slow) — the last case is auto-failed and escalated within a couple of minutes, not 15-30
+- **`agent_terminate`** lets the planner force a clean shutdown of a wedged instance instead of waiting it out — with an opt-in fully automatic tier for hard-stuck-but-connected tickets
+- **`agent_send` warns immediately, in the same turn, if nobody is actually there to receive it** — instead of silently reporting success when a role/instance was never launched
+- **The planner is structurally barred from claiming ticket work itself** (`ticket_claim` refuses the planner role outright) — planning and delegating is the job, never quietly doing the work when an instance is missing
+- **A mandatory closing checklist**: `worktree_finalize` refuses to merge until you declare the user actually confirmed the result, e2e tests ran (or don't apply), and the version was bumped (or doesn't apply) — and now pushes to the remote automatically after a successful merge
 - **Phased execution plans** — the planner declares which roles work together and in what order, and the system enforces it
 - **WhatsApp notifications** (via Evolution API) when a task completes or needs your input, so you don't have to watch the terminal
 - **A global `po` CLI** (`po init`, `po start`, `po doctor`, `po update`, `po uninstall`, `po end`) for scaffolding, launching, verifying the environment, keeping new orchestrated projects up to date, and closing them out

@@ -68,10 +68,13 @@ function ok(cond, msg) {
 	console.log(`   OK — ${msg}`);
 }
 
-// worktree_create only creates the worktree/branch, not reports/ inside it
-// (that's the planner's own job per prompts/planner.md) — mkdir first.
+// worktree_create only creates the worktree/branch, not the report dir inside
+// it (that's the planner's own job per prompts/planner.md) — mkdir first.
+// Revisione 37: reports/ moved under .pi/extensions/multiAgentOrchestrator/
+// (gitignored in real scaffolded projects) — kept in sync with reportsDir()
+// in extensions/orchestrator.ts.
 function writeReportHeader(wtPath, slug, content) {
-	const dir = path.join(wtPath, "reports");
+	const dir = path.join(wtPath, ".pi", "extensions", "multiAgentOrchestrator", "reports");
 	fs.mkdirSync(dir, { recursive: true });
 	fs.writeFileSync(path.join(dir, `${slug}.md`), content);
 }
@@ -97,7 +100,7 @@ async function makeScratchRepo(evolutionPort) {
 
 	fs.mkdirSync(path.join(dir, "agents"), { recursive: true });
 	fs.mkdirSync(path.join(dir, "prompts"), { recursive: true });
-	fs.mkdirSync(path.join(dir, "reports"), { recursive: true });
+	fs.mkdirSync(path.join(dir, ".pi", "extensions", "multiAgentOrchestrator", "reports"), { recursive: true });
 
 	// Copy the REAL config/prompts, not fakes — so the harness exercises the
 	// real docs-sync-brief text, the real planner.md instructions text (even
@@ -332,7 +335,7 @@ async function test1FullFlow(cwd, project, evo) {
 	const created = await planner.call("worktree_create", { slug });
 	ok(created.details.reused === false, "worktree_create: fresh worktree created");
 	const wtPath = created.details.worktree_path;
-	const reportRel = path.join("reports", `${slug}.md`);
+	const reportRel = path.join(".pi", "extensions", "multiAgentOrchestrator", "reports", `${slug}.md`);
 	writeReportHeader(wtPath, slug, `# Report: ${slug}\n\n- Task: aggiungi una funzione isPalindrome a src/util.ts\n- Stato: in corso\n`);
 
 	// 3. plan_set with the TDD-exception NOT used here — plain coder+reviewer
@@ -399,7 +402,7 @@ async function test1FullFlow(cwd, project, evo) {
 	ok(advanced.details.plan.phases[1].status === "unlocked", "plan_advance: phase 2 unlocked after phase 1 marked complete");
 
 	// 7. planner fans out to BOTH final-phase roles in parallel (this is the
-	// scenario docs/mvp-notes.md/architecture.mmd describe as W12).
+	// scenario docs/development-notes.md/architecture.mmd describe as W12).
 	const sendSec = await planner.call("agent_send", { target_role: "security-evaluator", prompt: `Verifica isPalindrome. worktree_path=${wtPath} report=${reportRel}`, slug, new_round: true });
 	const sendDocs = await planner.call("agent_send", { target_role: "docs-sync", prompt: `Allinea la documentazione. worktree_path=${wtPath} report=${reportRel}`, slug, new_round: true });
 	ok(!!sendSec.details.assignment_id && !!sendDocs.details.assignment_id, "agent_send: both final-phase roles reachable once phase 2 unlocked");
@@ -438,7 +441,7 @@ async function test1FullFlow(cwd, project, evo) {
 	// WhatsApp dispatch to the stub Evolution API server.
 	await planner.call("report_append", { slug, section: "## Report finale\n\nTutti i round completati, isPalindrome implementato, revisionato, verificato per sicurezza, documentato." });
 	const beforeCount = evo.received.length;
-	const finalized = await planner.call("worktree_finalize", { slug });
+	const finalized = await planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, push: false });
 	ok(finalized.details.merged === true, "worktree_finalize: real git merge succeeded");
 	ok(!fs.existsSync(wtPath), "worktree_finalize: worktree directory actually removed from disk");
 	const mainReport = path.join(cwd, reportRel);
@@ -493,7 +496,7 @@ async function test3OverlapDetection(cwd, project) {
 
 	// "Prior session": a planner instance creates a worktree and a report,
 	// then goes away (shuts down) without finalizing — exactly the real
-	// incident this feature exists to prevent (docs/mvp-notes.md, Rev. 24).
+	// incident this feature exists to prevent (docs/development-notes.md, Rev. 24).
 	const priorPlanner = await makeInstance("planner-prior", "planner-01", "planner", cwd, project);
 	const created = await priorPlanner.call("worktree_create", { slug });
 	writeReportHeader(created.details.worktree_path, slug, `# Report: ${slug}\n\n- Task: validazione codice fiscale italiano\n- Stato: in corso\n`);
@@ -542,7 +545,7 @@ async function test4DirtyMainAndConflict(cwd, project) {
 	// change — the real Revisione 24 pre-flight check must block on this
 	// BEFORE even attempting the merge.
 	fs.appendFileSync(path.join(cwd, "README.md"), "\nModifica non committata nella directory principale.\n");
-	const blocked = await planner.call("worktree_finalize", { slug });
+	const blocked = await planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, push: false });
 	ok(blocked.details.blocked_dirty_main === true, "worktree_finalize (real code): blocked by dirty main checkout BEFORE attempting any merge");
 	ok(fs.existsSync(wtPath), "worktree_finalize: worktree left completely intact when blocked");
 
@@ -553,7 +556,7 @@ async function test4DirtyMainAndConflict(cwd, project) {
 	await git(["add", "-A"], cwd);
 	await git(["commit", "-q", "-m", "main change to README (will conflict)"], cwd);
 
-	const conflicted = await planner.call("worktree_finalize", { slug });
+	const conflicted = await planner.call("worktree_finalize", { slug, user_confirmed: true, e2e_tests_run: true, version_bumped: true, push: false });
 	ok(conflicted.details.conflict === true && conflicted.details.merged === false, "worktree_finalize (real code): reports a genuine merge conflict");
 	ok(Array.isArray(conflicted.details.conflict_files) && conflicted.details.conflict_files.includes("README.md"), "worktree_finalize (real code): automatically lists README.md as the conflicting file");
 	ok(fs.existsSync(wtPath), "worktree_finalize: worktree preserved after a conflict, for manual resolution");
@@ -562,7 +565,7 @@ async function test4DirtyMainAndConflict(cwd, project) {
 
 	// Simulate the manual resolution the real incident described: cherry-pick
 	// straight into main, bypassing worktree_finalize entirely...
-	await git(["checkout", `task/${slug}`, "--", "reports"], cwd); // bring the report over manually too
+	await git(["checkout", `task/${slug}`, "--", path.join(".pi", "extensions", "multiAgentOrchestrator", "reports")], cwd); // bring the report over manually too
 	await git(["add", "-A"], cwd);
 	await git(["commit", "-q", "-m", "manual conflict resolution, bypassing worktree_finalize"], cwd);
 

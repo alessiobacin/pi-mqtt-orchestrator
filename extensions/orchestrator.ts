@@ -89,6 +89,60 @@ const ACTIVITY_LOG_CAP = 200;
 const WATCHDOG_INTERVAL_MS = Number(process.env.PI_ORCH_WATCHDOG_INTERVAL_MS) || 120_000; // how often the planner sweeps for stalled tickets
 const WATCHDOG_STALL_MS = Number(process.env.PI_ORCH_WATCHDOG_STALL_MS) || 900_000; // 15 min running with no ticket_complete → flagged
 
+// Revisione 40 — a real incident this same "ticket stuck running" check
+// CANNOT catch: every ticket in a run reached "done", ticket_complete's own
+// allDone branch auto-marked the run "completed" — and then nothing else
+// happened, because the follow-up (merge the worktree via worktree_finalize,
+// notify the operator) is the PLANNER's own judgment call, not something the
+// ticket/DAG layer does automatically. If the planner's own turn-taking stops
+// making progress right around when the last ticket completes (observed
+// cause in this incident: an LLM proxy container restarted mid-session — see
+// docs/development-notes.md), the run sits "completed" forever with no
+// worktree merged and no human notified, and moaFindStalledTickets() above
+// finds nothing wrong because there is no ticket left in "running" status to
+// flag. This is a DIFFERENT heuristic — "the DAG layer says done, but nothing
+// has moved since" — not a certainty either (a planner could legitimately be
+// composing a long final report), which is why it only ever informs, same as
+// the ticket-stall path, and only after a generous grace period.
+const WATCHDOG_FINALIZE_GRACE_MS = Number(process.env.PI_ORCH_WATCHDOG_FINALIZE_GRACE_MS) || 600_000; // 10 min "completed" with nothing since → flagged
+
+// Revisione 42 — a real incident (progetto "code-mem") showed a gap neither
+// check above catches: a ticket's assigned_instance had gone away ENTIRELY
+// (herdr tab closed, `pi` process not running at all — not "hung", just
+// GONE), and the planner, restarted, found itself facing that half-finished
+// ticket with nothing there to receive a delegation, and did the work itself
+// instead of relaunching a coder. moaFindStalledTickets() would eventually
+// have flagged this too, but only after WATCHDOG_STALL_MS (15 min) of pure
+// wall-clock waiting — and even then only as "maybe stalled", informational,
+// never a certainty. This case does NOT need to wait or guess: presence
+// (MQTT retained "status" per instance, LWT-backed, pruned client-side after
+// STALE_AFTER_MS ~45s of silence — see onPresenceMessage/staleSweepTimer) is
+// a genuinely deterministic signal of "is this instance actually connected
+// right now", not a heuristic. If a RUNNING ticket's assigned_instance has no
+// live presence card at all, that instance is confirmably not there — no
+// elapsed-time threshold needed, the very next watchdog sweep (at most
+// WATCHDOG_INTERVAL_MS after the fact, typically ~2 min, once presence has
+// had time to expire) can call it with certainty. See
+// moaFindOrphanedTickets()/watchdogSweep() below for what this drives: an
+// automatic (code-only, no LLM judgment involved) ticket_complete(failed) so
+// the slot frees up, PLUS a mandatory instruction to the planner to relaunch
+// the missing instance — never to do the ticket's work itself.
+//
+// Separately, and OFF by default (PI_ORCH_WATCHDOG_AUTO_TERMINATE=true to
+// enable): a ticket that's STILL connected (live presence, not offline) but
+// RUNNING well past this second, harder threshold gets a real kill — a
+// "terminate" control message published to that instance's own command
+// topic (see agent_terminate/handleTerminate below), forcing a clean
+// self-exit instead of waiting for the 30-minute agent_send timeout or
+// leaving a possibly-wedged process sitting there indefinitely. This is
+// opt-in and deliberately NOT the default: unlike the orphan case above
+// (which only acts on an instance that's already gone), forcibly killing a
+// STILL-RUNNING process risks destroying a genuinely slow-but-progressing
+// task — a real trade-off the operator should choose knowingly, not one
+// this package should make silently on their behalf.
+const WATCHDOG_AUTO_TERMINATE_ENABLED = process.env.PI_ORCH_WATCHDOG_AUTO_TERMINATE === "true";
+const WATCHDOG_AUTO_TERMINATE_MS = Number(process.env.PI_ORCH_WATCHDOG_AUTO_TERMINATE_MS) || 1_200_000; // 20 min, well under the 30-min agent_send timeout
+
 const FALLBACK_PALETTE = [
 	"#72F1B8", "#36F9F6", "#FF7EDB", "#FEDE5D",
 	"#C792EA", "#FF8B39", "#4D9DE0", "#FFAA8B",
@@ -118,6 +172,20 @@ type ResponseEnvelope = {
 	responder_instance: string;
 	response: any;
 	error?: string | null;
+	timestamp: string;
+};
+
+// Revisione 42 — a forced-shutdown control message, published on the SAME
+// per-instance command topic agent_send/handleCommand already use
+// (pi/<project>/agents/<id>/commands), so it needs no new topic/subscription
+// — just a new `type` discriminant the existing message handler branches on.
+// Deliberately minimal: no reply is expected (the target is being told to
+// exit, not asked to do work), so there's no reply_to/assignment_id/hops.
+type TerminateEnvelope = {
+	type: "terminate";
+	requested_by_instance: string;
+	requested_by_role: string;
+	reason: string;
 	timestamp: string;
 };
 
@@ -223,63 +291,6 @@ function loadConfig(cwd: string, configDir: string): {
 		roles: (rolesDoc?.roles as Record<string, RoleConfig>) || {},
 		agents: (agentsDoc?.agents as Record<string, InstanceConfig>) || {},
 	};
-}
-
-// ━━ Control plane: allow-list for agent_control (Tickets 01/03) ━━━━━━━━
-//
-// Separates the data plane (agent_send: instructions a worker *reads and
-// interprets*) from the control plane (agent_control: verbs that *pilot a
-// worker process*). The control plane accepts ONLY a narrow, allowlisted set
-// of verbs (launch/interrupt/relaunch/status) — never free-text or raw keys —
-// and each verb has a postcondition. This closes the risk (architecture §25/40)
-// of the planner composing arbitrary shell to launch/interrupt instances.
-// The allow-list is configurable via config/control.json (see allowListConfig())
-// but defaults to the safe set; loosening it is an explicit operator choice.
-
-const DEFAULT_CONTROL_ALLOWLIST = {
-	verbs: ["launch", "interrupt", "relaunch", "status"],
-	// Allowed root-command patterns per verb. A CLI entry is matched exactly by
-	// argv[0] (the command name), never by free-text globbing into arbitrary
-	// args — an entry outside these must be explicitly added to config.
-	cli: {
-		launch: [["tmux"], ["herdr"]],
-		interrupt: [["tmux"], ["herdr"]],
-		relaunch: [["tmux"], ["herdr"]],
-	},
-} as const;
-
-type ControlAllowlist = { verbs: string[]; cli: Record<string, Array<{ 0: string }>> };
-
-type ControlVerb = "launch" | "interrupt" | "relaunch" | "status";
-
-function isControlVerbAllowed(verb: string, allowlist = DEFAULT_CONTROL_ALLOWLIST): boolean {
-	return Array.isArray((allowlist as any).verbs) && (allowlist as any).verbs.includes(verb);
-}
-
-// A CLI execution (command name + first arg, used for launch/interrupt/relaunch
-// targets) is allowed only if the exact argv[0] appears among the allowlisted
-// patterns for that verb. Stops a disallowed binary from ever being launched.
-function isControlCliAllowed(verb: string, argv: string[], allowlist = DEFAULT_CONTROL_ALLOWLIST): boolean {
-	if (!isControlVerbAllowed(verb, allowlist) || !Array.isArray(argv) || argv.length === 0) return false;
-	const root = argv[0];
-	const patterns = ((allowlist as any).cli?.[verb] || []) as Array<Array<string>>;
-	return patterns.some((p) => p[0] === root);
-}
-
-function controlAllowlistConfig(cwd: string): ControlAllowlist {
-	// Optional operator override at <cwd>/config/control.json — merged over the
-	// default allow-list (defaults can be restricted, rarely widened).
-	try {
-		const p = path.join(cwd, "config", "control.json");
-		if (!fs.existsSync(p)) return DEFAULT_CONTROL_ALLOWLIST as ControlAllowlist;
-		const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
-		return {
-			verbs: Array.isArray(parsed?.verbs) ? parsed.verbs : DEFAULT_CONTROL_ALLOWLIST.verbs,
-			cli: parsed?.cli ?? DEFAULT_CONTROL_ALLOWLIST.cli,
-		};
-	} catch {
-		return DEFAULT_CONTROL_ALLOWLIST as ControlAllowlist;
-	}
 }
 
 // Merge precedence: INSTANCE > ROLE > GLOBAL (architecture.md §3).
@@ -1008,24 +1019,7 @@ interface OrchestratorStorage {
 	listEvents(run_id: string, opts?: { since_id?: number; limit?: number }): EventRecord[];
 	createCheckpoint(run_id: string, label: string, payload?: unknown): void;
 	listCheckpoints(run_id: string): Array<{ id: number; run_id: string; label: string; payload: unknown; created_at: string }>;
-	createDecisionHold(input: { id?: string; run_id: string; ticket_id?: string | null; question: string; context?: unknown }): DecisionHoldRecord;
-	getDecisionHold(id: string): DecisionHoldRecord | null;
-	listDecisionHolds(run_id?: string): DecisionHoldRecord[];
-	resolveDecisionHold(id: string, resolved_by: string, decision: string): DecisionHoldRecord;
 	close(): void;
-}
-
-interface DecisionHoldRecord {
-	id: string;
-	run_id: string;
-	ticket_id: string | null;
-	question: string;
-	context: unknown;
-	status: "open" | "resolved";
-	opened_at: string;
-	resolved_at: string | null;
-	resolved_by: string | null;
-	decision: string | null;
 }
 
 const MOA_SCHEMA_SQL = `
@@ -1095,30 +1089,10 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 	created_at TEXT NOT NULL
 );
 
--- Durable human-approval gate (firstmate 'decision-hold' pattern). A hold
--- opens in the DB, persists across restarts by construction (it's a row), and
--- closes ONLY when an explicit operator decision is recorded (resolved_by +
--- decision) — never by the planner 'remembering'. Survives restarts: the
--- reconciliation/startup path and run_status both read it from SQLite.
-CREATE TABLE IF NOT EXISTS decision_holds (
-	id TEXT PRIMARY KEY,
-	run_id TEXT NOT NULL REFERENCES runs(id),
-	ticket_id TEXT,
-	question TEXT NOT NULL,
-	context TEXT NOT NULL DEFAULT '{}',
-	status TEXT NOT NULL DEFAULT 'open',
-	opened_at TEXT NOT NULL,
-	resolved_at TEXT,
-	resolved_by TEXT,
-	decision TEXT
-);
-
 CREATE INDEX IF NOT EXISTS idx_tickets_run ON tickets(run_id);
 CREATE INDEX IF NOT EXISTS idx_deps_ticket ON ticket_dependencies(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_deps_depends_on ON ticket_dependencies(depends_on_id);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
-CREATE INDEX IF NOT EXISTS idx_holds_run ON decision_holds(run_id);
-CREATE INDEX IF NOT EXISTS idx_holds_status ON decision_holds(status);
 `;
 
 class SQLiteOrchestratorStorage implements OrchestratorStorage {
@@ -1294,41 +1268,6 @@ class SQLiteOrchestratorStorage implements OrchestratorStorage {
 		return rows.map((r) => ({ ...r, payload: JSON.parse(r.payload || "{}") }));
 	}
 
-	createDecisionHold(input: { id?: string; run_id: string; ticket_id?: string | null; question: string; context?: unknown }): DecisionHoldRecord {
-		const id = input.id ?? `hold_${crypto.randomUUID()}`;
-		const opened_at = nowIso();
-		this.db
-			.prepare(
-				"INSERT INTO decision_holds (id, run_id, ticket_id, question, context, status, opened_at) VALUES (?, ?, ?, ?, ?, 'open', ?)",
-			)
-			.run(id, input.run_id, input.ticket_id ?? null, input.question, JSON.stringify(input.context ?? {}), opened_at);
-		return this.getDecisionHold(id) as DecisionHoldRecord;
-	}
-
-	getDecisionHold(id: string): DecisionHoldRecord | null {
-		const row = this.db.prepare("SELECT * FROM decision_holds WHERE id = ?").get(id) as any;
-		if (!row) return null;
-		return { ...row, context: JSON.parse(row.context || "{}"), status: row.status, resolved_at: row.resolved_at, resolved_by: row.resolved_by, decision: row.decision };
-	}
-
-	listDecisionHolds(run_id?: string): DecisionHoldRecord[] {
-		const rows = run_id
-			? (this.db.prepare("SELECT * FROM decision_holds WHERE run_id = ? ORDER BY opened_at ASC").all(run_id) as any[])
-			: (this.db.prepare("SELECT * FROM decision_holds ORDER BY opened_at ASC").all() as any[]);
-		return rows.map((r) => ({ ...r, context: JSON.parse(r.context || "{}"), status: r.status, resolved_at: r.resolved_at, resolved_by: r.resolved_by, decision: r.decision }));
-	}
-
-	resolveDecisionHold(id: string, resolved_by: string, decision: string): DecisionHoldRecord {
-		const hold = this.getDecisionHold(id);
-		if (!hold) throw new Error(`resolveDecisionHold: no hold "${id}".`);
-		if (hold.status !== "open") throw new Error(`resolveDecisionHold: hold "${id}" already ${hold.status} — a hold closes exactly once.`);
-		const resolved_at = nowIso();
-		this.db
-			.prepare("UPDATE decision_holds SET status = 'resolved', resolved_at = ?, resolved_by = ?, decision = ? WHERE id = ?")
-			.run(resolved_at, resolved_by, decision, id);
-		return this.getDecisionHold(id) as DecisionHoldRecord;
-	}
-
 	close(): void {
 		try {
 			this.db.close();
@@ -1445,6 +1384,74 @@ function moaFindStalledTickets(storage: OrchestratorStorage, project: string, no
 	return stalled;
 }
 
+// ━━ Watchdog: detect runs stuck "completed" with no finalize/notify follow-up
+// (Revisione 40) ━━ See WATCHDOG_FINALIZE_GRACE_MS above for why this exists
+// and why it's a separate check from moaFindStalledTickets: ticket_complete's
+// own allDone branch already flips a run to "completed" the instant every one
+// of its tickets reaches "done" — at that point there is, by definition,
+// nothing left "running" for moaFindStalledTickets to notice, even though the
+// operator-facing half of the job (merge the worktree, send the completion
+// notification) may never have happened. Pure/deterministic given `nowMs`,
+// same testability discipline as moaFindStalledTickets — see
+// scripts/smoke-test-watchdog.mjs.
+interface UnfinalizedRunInfo {
+	run_id: string;
+	objective: string;
+	completed_at: string;
+	elapsed_ms: number;
+}
+
+function moaFindUnfinalizedRuns(storage: OrchestratorStorage, project: string, nowMs: number, graceMs: number): UnfinalizedRunInfo[] {
+	const found: UnfinalizedRunInfo[] = [];
+	for (const run of storage.listRuns(project)) {
+		if (run.status !== "completed") continue;
+		const elapsed = nowMs - Date.parse(run.updated_at);
+		if (elapsed >= graceMs) {
+			found.push({ run_id: run.id, objective: run.objective, completed_at: run.updated_at, elapsed_ms: elapsed });
+		}
+	}
+	return found;
+}
+
+// ━━ Watchdog: detect tickets whose assigned instance is confirmably GONE
+// (Revisione 42) ━━ See the WATCHDOG_AUTO_TERMINATE_* comment above for the
+// real incident this covers. Pure/deterministic given a presence snapshot
+// (never reads the live module-level `presence` Map directly, never calls
+// Date.now()) so it stays unit-testable the same way as
+// moaFindStalledTickets/moaFindUnfinalizedRuns — see
+// scripts/smoke-test-instance-liveness.mjs. Unlike those two, this needs NO
+// elapsed-time threshold at all: presence is either there (instance
+// confirmably connected) or it isn't (LWT already fired, or the client-side
+// staleSweepTimer already pruned it after STALE_AFTER_MS of silence) — a
+// ticket "running" against an instance with no live presence card is not a
+// guess, it's a fact.
+interface OrphanedTicketInfo {
+	run_id: string;
+	ticket_id: string;
+	title: string;
+	assigned_instance: string;
+	running_since: string;
+}
+
+function moaFindOrphanedTickets(
+	storage: OrchestratorStorage,
+	project: string,
+	presenceSnapshot: Map<string, { status: PresenceStatus }>,
+): OrphanedTicketInfo[] {
+	const orphaned: OrphanedTicketInfo[] = [];
+	const runs = storage.listRuns(project).filter((r) => r.status === "active");
+	for (const run of runs) {
+		for (const t of storage.listTickets(run.id)) {
+			if (t.status !== "running" || !t.assigned_instance) continue;
+			const card = presenceSnapshot.get(t.assigned_instance);
+			if (!card || card.status === "offline") {
+				orphaned.push({ run_id: run.id, ticket_id: t.id, title: t.title, assigned_instance: t.assigned_instance, running_since: t.updated_at });
+			}
+		}
+	}
+	return orphaned;
+}
+
 // ━━ Default export ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 export default function (pi: ExtensionAPI) {
@@ -1512,6 +1519,31 @@ export default function (pi: ExtensionAPI) {
 	// (not just ticket_id) so a fresh ticket_claim after a reassignment starts a
 	// new episode and re-arms alerting instead of staying silently suppressed.
 	const watchdogAlertLevel = new Map<string, number>();
+	// run_id set already alerted for "completed but never finalized" (Revisione
+	// 40) — fired at most once per run, same discipline as watchdogAlertLevel
+	// above (an operator reading a heuristic "verifica manualmente" WhatsApp
+	// every sweep for the same already-known situation is noise, not signal).
+	const watchdogRunAlerted = new Set<string>();
+	// Revisione 42 — same "alert once per running episode" discipline as
+	// watchdogAlertLevel above, for the two new checks: orphaned tickets
+	// (instance confirmably gone — moaFindOrphanedTickets) and, opt-in,
+	// hard-stuck-but-still-connected tickets (WATCHDOG_AUTO_TERMINATE_*).
+	// Keyed the same way (ticket_id::running_since) so a fresh ticket_claim
+	// after reassignment starts a new episode and re-arms both.
+	const watchdogOrphanAlerted = new Set<string>();
+	const watchdogAutoTerminated = new Set<string>();
+	// Tickets this instance currently holds "running" (ticket_claim..ticket_complete),
+	// tracked here because agent_send's own inboundQueue (below) is a DIFFERENT
+	// completion signal — an instance can be deep into real ticket work with a
+	// long-since-fulfilled (or never-held) inbound entry, which is exactly the
+	// mismatch an operator caught in production: docs-sync-02 showed "idle" in
+	// the MQTT presence widget while its own pane was actively editing files for
+	// minutes (Revisione 40, docs/development-notes.md). Presence "busy" now
+	// reflects EITHER signal, not just inboundQueue.
+	const activeTicketIds = new Set<string>();
+	function computeSelfStatus(): PresenceStatus {
+		return inboundQueue.size > 0 || activeTicketIds.size > 0 ? "busy" : "idle";
+	}
 	let currentCtx: ExtensionContext | null = null;
 	let currentInbound: InboundContext | null = null;
 	let mqttConnected = false;
@@ -1579,7 +1611,7 @@ export default function (pi: ExtensionAPI) {
 		const self = {
 			instance: identity.instance,
 			role: identity.role,
-			status: inboundQueue.size > 0 ? "busy" : "idle",
+			status: computeSelfStatus(),
 			current_load: inboundQueue.size,
 			capacity: identity.capacity,
 			self: true,
@@ -1736,6 +1768,38 @@ export default function (pi: ExtensionAPI) {
 				// agent_get/agent_await to pick up manually.
 			}
 		}
+	}
+
+	// Revisione 42 — see TerminateEnvelope/agent_terminate/WATCHDOG_AUTO_TERMINATE_*
+	// above. This runs in the TARGET instance's own process (its own message
+	// handler dispatches here — a "terminate" envelope for instance X only
+	// ever reaches X, since it's published on X's own per-instance command
+	// topic), so it's a genuine self-directed shutdown, not a remote kill -9:
+	// the process gets to publish "offline" and close its MQTT connection
+	// cleanly (cleanShutdown() below is the exact same path session_shutdown
+	// already uses) before exiting. Best-effort throughout, same discipline
+	// as the rest of this file — but unlike every other best-effort path
+	// here, this one is SUPPOSED to end the process, so the final step is a
+	// real process.exit(), deliberately with a non-zero code to distinguish
+	// "terminated on request" from a normal exit in any process-level
+	// monitoring outside this extension's own visibility (herdr, systemd,
+	// whatever the operator's environment uses).
+	function handleTerminate(env: TerminateEnvelope): void {
+		if (!identity) return;
+		logEvent("agent_terminate_received", { requested_by_instance: env.requested_by_instance, requested_by_role: env.requested_by_role, reason: env.reason });
+		herdrReportAgent(identity.displayName, "blocked", identity.instance);
+		void cleanShutdown().finally(() => {
+			// Test seam (Revisione 42): the smoke-test harness (scripts/
+			// smoke-test-*.mjs) runs every fake "instance" as a plain closure
+			// sharing ONE real Node process (see FakeInstance) — an unconditional
+			// process.exit() here would kill the whole test runner, not just
+			// "this instance". In production each instance IS its own OS process
+			// (a separate `pi` CLI invocation), so this only ever matters under
+			// test — cleanShutdown() above (offline presence + MQTT disconnect)
+			// still runs for real either way, only the actual exit is skipped.
+			if (process.env.PI_ORCH_TEST_NO_EXIT === "1") return;
+			process.exit(1);
+		});
 	}
 
 	// The widget installed by installPoolWidget() only actually redraws when
@@ -1911,8 +1975,9 @@ export default function (pi: ExtensionAPI) {
 			if (!identity || !T) return;
 			if (topicStr === T.agentCommands(identity.instance)) {
 				try {
-					const env = JSON.parse(payload.toString("utf-8")) as CommandEnvelope;
+					const env = JSON.parse(payload.toString("utf-8")) as CommandEnvelope | TerminateEnvelope;
 					if (env.type === "command") handleCommand(env);
+					else if (env.type === "terminate") handleTerminate(env);
 				} catch { /* ignore malformed */ }
 				return;
 			}
@@ -1963,7 +2028,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					mqttConnected = true;
 					everConnected = true;
-					await publishPresence(inboundQueue.size > 0 ? "busy" : "idle");
+					await publishPresence(computeSelfStatus());
 					pi.appendEntry("orchestrator-log", { event: "connected", instance: identity.instance, role, project, broker: brokerUrl });
 					logEvent("connected", { broker: brokerUrl });
 					setTerminalTitle(identity.displayName); // reassert — some terminals/pi's own TUI redraws can clear a title set before the app fully took over the screen
@@ -1980,7 +2045,7 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		heartbeatTimer = setInterval(() => {
-			if (mqttConnected) void publishPresence(inboundQueue.size > 0 ? "busy" : "idle");
+			if (mqttConnected) void publishPresence(computeSelfStatus());
 		}, HEARTBEAT_MS);
 		try { (heartbeatTimer as any).unref?.(); } catch { /* ignore */ }
 
@@ -2006,15 +2071,6 @@ export default function (pi: ExtensionAPI) {
 		if (identity.role === "planner") {
 			watchdogTimer = setInterval(() => { void watchdogSweep(Date.now()); }, WATCHDOG_INTERVAL_MS);
 			try { (watchdogTimer as any).unref?.(); } catch { /* ignore */ }
-
-			// Reconciliation across restarts (Ticket 06): a short delay after
-			// connect so retained MQTT presence has had time to arrive, then a
-			// single deterministic pass that surfaces dangling running tickets
-			// and open holds from the previous sessions' active runs. It only
-			// RECORDS findings (checkpoint + event) for the planner's next turn
-			// to act on — the resumability contract forbids auto-requeue.
-			const reconcilTimer = setTimeout(() => { void moaReconcileStartup(); }, Number(process.env.PI_ORCH_RECONCILE_DELAY_MS) || 1500);
-			try { (reconcilTimer as any).unref?.(); } catch { /* ignore */ }
 		}
 	});
 
@@ -2160,67 +2216,6 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// Reconciliation across restarts (firstmate 'restart is a non-event'
-	// principle as a deterministic, idempotent pass — NOT an LLM step). On
-	// session start the planner scans THIS project's active runs and derives
-	// two facts purely from SQLite + live MQTT presence:
-	//   (1) dangling running tickets — running tickets whose assigned_instance
-	//       is no longer in the live presence set (its process died);
-	//   (2) open decision holds that still gate work.
-	// It RECORDS these as a durable `reconcile_sweep` checkpoint (+ log event)
-	// and RETURNS them. It does NOT auto-requeue/cancel anything: the
-	// resumability contract (Revisione 26) says a ticket left running by a
-	// dead process is surfaced, not silently resolved — a planner turn is what
-	// decides how to proceed (ping/reassign/fail), via the same [watchdog]
-	// wake the stall sweep already drives. Idempotency: the pass is a pure
-	// read+append; running it twice over the same DB+presence yields the same
-	// derived findings and only appends duplicate checkpoints (the planner
-	// dedupes by run/status when acting, so no side effect is applied twice).
-	// Planner-only; never throws; every side effect best-effort.
-	async function moaReconcileStartup(): Promise<
-		{ run_id: string; dangling: Array<{ ticket_id: string; assigned_instance: string | null; title: string }>; open_holds: Array<{ hold_id: string; question: string }> }[]
-	> {
-		if (!identity || identity.role !== "planner" || !moaStorage) return [];
-		// An instance is 'live' for reconciliation only if its presence card is
-		// current AND not offline (a retained 'offline' card from a graceful
-		// shutdown lingers on the broker and must NOT count as live), and it
-		// belongs to this project. This is what makes a crashed/gracefully-stopped
-		// worker's running tickets surface as dangling.
-		const liveInstances = new Set<string>([
-			identity.instance,
-			...[...presence.values()]
-				.filter((c) => c.status !== "offline" && c.project === identity.project)
-				.map((c) => c.instance),
-		]);
-		const findings: {
-			run_id: string;
-			dangling: Array<{ ticket_id: string; assigned_instance: string | null; title: string }>;
-			open_holds: Array<{ hold_id: string; question: string }>;
-		}[] = [];
-		try {
-			const activeRuns = moaStorage.listRuns(identity.project).filter((r) => r.status === "active");
-			for (const run of activeRuns) {
-				const tickets = moaStorage.listTickets(run.id);
-				const dangling = tickets
-					.filter((t) => t.status === "running" && t.assigned_instance && !liveInstances.has(t.assigned_instance))
-					.map((t) => ({ ticket_id: t.id, assigned_instance: t.assigned_instance, title: t.title }));
-				const openHolds = moaStorage
-					.listDecisionHolds(run.id)
-					.filter((h) => h.status === "open")
-					.map((h) => ({ hold_id: h.id, question: h.question }));
-				if (dangling.length || openHolds.length) {
-					findings.push({ run_id: run.id, dangling, open_holds: openHolds });
-					moaStorage.createCheckpoint(run.id, "reconcile_sweep", { findings: { dangling, open_holds: openHolds }, at: nowIso() });
-					moaStorage.recordEvent(run.id, "reconcile_sweep", { dangling, open_holds: openHolds });
-					logEvent("moa_reconcile_sweep", { run_id: run.id, dangling: dangling.length, open_holds: openHolds.length });
-				}
-			}
-		} catch {
-			// best-effort — a reconciliation failure must never prevent startup
-		}
-		return findings;
-	}
-
 	// Planner-only (a coder/specialist instance can't act on a stalled ticket
 	// anyway — reassignment/escalation is a planning decision). No-op for every
 	// other role and a no-op until the workspace/DB actually exists (moaStorage
@@ -2279,6 +2274,181 @@ export default function (pi: ExtensionAPI) {
 				// best-effort — the SQLite event + MQTT publish + WhatsApp above already happened regardless
 			}
 		}
+
+		// Revisione 42 — orphaned tickets: assigned instance confirmably not
+		// connected (see moaFindOrphanedTickets() above). Fires independently of
+		// the elapsed-time stall check above — no waiting needed, the presence
+		// snapshot already tells us the instance is gone. Deterministic,
+		// code-only action: mark the ticket "failed" itself (freeing the slot)
+		// and force a mandatory relaunch instruction into the planner's own
+		// turn — not a suggestion, since the real incident this closes was
+		// exactly the planner treating "the coder never showed up" as license
+		// to do the work itself instead of relaunching one.
+		try {
+			const orphaned = moaFindOrphanedTickets(moaStorage, identity.project, presence);
+			for (const o of orphaned) {
+				const episodeKey = `${o.ticket_id}::${o.running_since}`;
+				if (watchdogOrphanAlerted.has(episodeKey)) continue;
+				watchdogOrphanAlerted.add(episodeKey);
+
+				const summary = `istanza "${o.assigned_instance}" risultata offline/disconnessa (nessuna presence viva) — rilevato dal watchdog, ticket riportato a failed automaticamente.`;
+				try {
+					moaStorage.updateTicketStatus(o.ticket_id, "failed", { result_summary: summary });
+					moaStorage.recordEvent(o.run_id, "ticket_failed", { ticket_id: o.ticket_id, result_summary: summary, auto: true, reason: "orphaned_instance" }, o.ticket_id);
+				} catch {
+					// best-effort — the notification below still fires even if the DB write fails
+				}
+				void moaPublishEvent(o.run_id, "ticket_failed", { ticket_id: o.ticket_id, auto: true, reason: "orphaned_instance" });
+				logEvent("watchdog_orphaned_ticket_auto_failed", { run_id: o.run_id, ticket_id: o.ticket_id, assigned_instance: o.assigned_instance });
+
+				const waMessage =
+					`🔴 watchdog: l'istanza "${o.assigned_instance}", assegnataria del ticket "${o.title}" (${o.ticket_id}), risulta OFFLINE — ` +
+					`il ticket è stato automaticamente riportato a "failed". Il planner è stato svegliato con l'istruzione di rilanciare l'istanza.`;
+				void sendWhatsAppNotification(waMessage).then((r) => logEvent("whatsapp_notify", { ok: r.ok, detail: r.detail, reason: "watchdog_orphaned_instance", ticket_id: o.ticket_id }));
+
+				try {
+					pi.sendMessage(
+						{
+							customType: "orchestrator-watchdog",
+							content:
+								`[watchdog] L'istanza "${o.assigned_instance}", a cui era assegnato il ticket "${o.title}" (${o.ticket_id}), risulta OFFLINE (nessuna ` +
+								`presence MQTT viva) — il ticket è già stato riportato automaticamente a "failed" per liberare lo slot. AZIONE OBBLIGATORIA: rilancia ` +
+								`ora "${o.assigned_instance}" (stesso nome o uno nuovo dello stesso ruolo) con lo stesso meccanismo herdr/tmux usato per la selezione ` +
+								`iniziale del team, poi ripianifica questo lavoro (ticket_create/ticket_claim) su quell'istanza una volta che agent_list la mostra ` +
+								`viva. NON eseguire tu il lavoro di questo ticket: sei il planner, il tuo compito è pianificare e delegare, mai scrivere codice al ` +
+								`posto di un coder assente. L'utente è già stato avvisato via WhatsApp (se configurato).`,
+							display: true,
+							details: { run_id: o.run_id, ticket_id: o.ticket_id, assigned_instance: o.assigned_instance },
+						},
+						{ deliverAs: "followUp", triggerTurn: true },
+					);
+				} catch {
+					// best-effort
+				}
+			}
+		} catch {
+			// best-effort — never let this new check take down the rest of the sweep
+		}
+
+		// Revisione 42 — opt-in hard-stuck auto-terminate
+		// (PI_ORCH_WATCHDOG_AUTO_TERMINATE=true — see WATCHDOG_AUTO_TERMINATE_*
+		// above for the trade-off this is deliberately NOT on by default for).
+		// Only ever considers tickets that are BOTH past the harder threshold
+		// AND still presence-live (not offline) — an already-gone instance is
+		// handled by the orphan block above instead, nothing left to terminate.
+		if (WATCHDOG_AUTO_TERMINATE_ENABLED && client && T) {
+			try {
+				const hardStuck = moaFindStalledTickets(moaStorage, identity.project, nowMs, WATCHDOG_AUTO_TERMINATE_MS);
+				for (const s of hardStuck) {
+					if (!s.assigned_instance) continue;
+					const episodeKey = `${s.ticket_id}::${s.running_since}`;
+					if (watchdogAutoTerminated.has(episodeKey)) continue;
+					const card = presence.get(s.assigned_instance);
+					if (!card || card.status === "offline") continue; // already-gone — the orphan block above already handled it
+					watchdogAutoTerminated.add(episodeKey);
+
+					const minutes = Math.round(s.elapsed_ms / 60_000);
+					const env: TerminateEnvelope = {
+						type: "terminate",
+						requested_by_instance: identity.instance,
+						requested_by_role: identity.role,
+						reason: `watchdog: ticket "${s.ticket_id}" running da ${minutes} min senza ticket_complete (soglia auto-terminate superata)`,
+						timestamp: nowIso(),
+					};
+					try {
+						await client.publishAsync(T.agentCommands(s.assigned_instance), JSON.stringify(env), { qos: 1 });
+					} catch {
+						// best-effort — the notification/log below still happen regardless
+					}
+					try {
+						moaStorage.recordEvent(s.run_id, "ticket_auto_terminated", { ticket_id: s.ticket_id, assigned_instance: s.assigned_instance, elapsed_ms: s.elapsed_ms });
+					} catch {
+						// best-effort
+					}
+					logEvent("watchdog_auto_terminate", { run_id: s.run_id, ticket_id: s.ticket_id, assigned_instance: s.assigned_instance, elapsed_ms: s.elapsed_ms });
+
+					const waMessage =
+						`🔴 watchdog: istanza "${s.assigned_instance}" bloccata da ${minutes} min sul ticket "${s.title}" (${s.ticket_id}) — terminazione ` +
+						`automatica inviata (PI_ORCH_WATCHDOG_AUTO_TERMINATE=true). Il planner deve rilanciarla.`;
+					void sendWhatsAppNotification(waMessage).then((r) => logEvent("whatsapp_notify", { ok: r.ok, detail: r.detail, reason: "watchdog_auto_terminate", ticket_id: s.ticket_id }));
+
+					try {
+						pi.sendMessage(
+							{
+								customType: "orchestrator-watchdog",
+								content:
+									`[watchdog] Ho appena inviato una terminazione automatica a "${s.assigned_instance}" (bloccata da ${minutes} minuti sul ticket ` +
+									`"${s.title}", ${s.ticket_id}, senza ticket_complete — soglia PI_ORCH_WATCHDOG_AUTO_TERMINATE_MS superata). AZIONE OBBLIGATORIA: ` +
+									`verifica con agent_list che sia sparita, poi rilanciala (stesso meccanismo herdr/tmux della selezione del team) e marca ` +
+									`questo ticket come failed con ticket_complete prima di ripianificarlo — NON eseguire tu il lavoro del ticket.`,
+								display: true,
+								details: { run_id: s.run_id, ticket_id: s.ticket_id, assigned_instance: s.assigned_instance, elapsed_ms: s.elapsed_ms },
+							},
+							{ deliverAs: "followUp", triggerTurn: true },
+						);
+					} catch {
+						// best-effort
+					}
+				}
+			} catch {
+				// best-effort — never let this take down the rest of the sweep
+			}
+		}
+
+		// Revisione 40 — see moaFindUnfinalizedRuns() above. Independent of the
+		// ticket-stall loop above: a run can be fully "completed" at the DAG
+		// layer (nothing running, nothing to flag there) while still missing its
+		// operator-facing follow-up. `pi.sendMessage(..., {triggerTurn: true})`
+		// below is the actual "awake" half of this fix — if the planner's own
+		// turn-loop merely went idle (rather than the process having genuinely
+		// exited), this forces a fresh turn instead of waiting for one that may
+		// never come on its own. The WhatsApp send is a plain fetch, independent
+		// of this planner's own LLM turn entirely, so it still reaches the
+		// operator even if that revival attempt does nothing (process actually
+		// dead, or wedged deeper than a turn boundary).
+		try {
+			const unfinalized = moaFindUnfinalizedRuns(moaStorage, identity.project, nowMs, WATCHDOG_FINALIZE_GRACE_MS);
+			for (const r of unfinalized) {
+				if (watchdogRunAlerted.has(r.run_id)) continue;
+				watchdogRunAlerted.add(r.run_id);
+
+				const minutes = Math.round(r.elapsed_ms / 60_000);
+				try {
+					moaStorage.recordEvent(r.run_id, "run_unfinalized_stall", { elapsed_ms: r.elapsed_ms });
+				} catch {
+					// best-effort — never let a logging failure hide this from the other channels below
+				}
+				logEvent("watchdog_unfinalized_run_detected", { run_id: r.run_id, objective: r.objective, elapsed_ms: r.elapsed_ms });
+
+				const waMessage =
+					`⚠️ watchdog: il run "${r.objective}" (${r.run_id}) risulta con TUTTI i ticket completati da ${minutes} min, ma nessun ` +
+					`worktree_finalize/notifica di chiusura risulta ancora arrivato — possibile blocco del planner (es. turno interrotto dal ` +
+					`provider LLM) subito dopo l'ultimo ticket_complete. Se il merge/la notifica finale sono già stati fatti manualmente, ignora ` +
+					`questo avviso — è un'euristica sul tempo trascorso, non una certezza.`;
+				void sendWhatsAppNotification(waMessage).then((r2) => logEvent("whatsapp_notify", { ok: r2.ok, detail: r2.detail, reason: "watchdog_unfinalized_run", run_id: r.run_id }));
+
+				try {
+					pi.sendMessage(
+						{
+							customType: "orchestrator-watchdog",
+							content:
+								`[watchdog] Il run "${r.objective}" (${r.run_id}) ha tutti i ticket completati da ${minutes} minuti, ma non risulta ancora ` +
+								`nessun worktree_finalize né notifica di chiusura per questo lavoro. Se il task ha un worktree associato ancora aperto, ` +
+								`chiama worktree_finalize ora; se è già stato finalizzato per un'altra via, non serve fare nulla — annota nel report cosa ` +
+								`hai verificato. L'utente è già stato avvisato via WhatsApp (se configurato).`,
+							display: true,
+							details: { run_id: r.run_id, objective: r.objective, elapsed_ms: r.elapsed_ms },
+						},
+						{ deliverAs: "followUp", triggerTurn: true },
+					);
+				} catch {
+					// best-effort — the SQLite event + WhatsApp above already happened regardless
+				}
+			}
+		} catch {
+			// best-effort — never let this second check take down the ticket-stall loop above
+		}
+
 		return stalled;
 	}
 
@@ -2290,8 +2460,19 @@ export default function (pi: ExtensionAPI) {
 		description: "List known agent instances (role, team, status) discovered via MQTT presence. Presence is retained, so peers appear immediately even if they connected before you.",
 		parameters: Type.Object({}),
 		async execute() {
+			// Revisione 41 bug fix: the "offline" presence payload published on
+			// LWT/clean shutdown deliberately carries only instance/role/project/
+			// status/last_heartbeat (see the two `client.publishAsync(...,
+			// {status:"offline", ...})` call sites) — it never had a `team`/
+			// `capacity`/`current_load` to report in the first place, an agent
+			// that's gone is gone. This tool assumed every PresenceCard was the
+			// full shape and crashed (`Cannot read properties of undefined
+			// (reading 'join')`) the first time ANY known peer went offline —
+			// found while testing the agent_send presence-warning fix below,
+			// which calls this same map. Default the missing fields instead of
+			// assuming they're always present.
 			const agents = [...presence.values()].map((c) => ({
-				instance: c.instance, role: c.role, team: c.team, status: c.status, capacity: c.capacity, current_load: c.current_load,
+				instance: c.instance, role: c.role, team: c.team ?? [], status: c.status, capacity: c.capacity ?? 0, current_load: c.current_load ?? 0,
 			}));
 			const lines = agents.length === 0
 				? "No peer agents known yet (they may not have published presence, or you may need to wait for the retained message)."
@@ -2380,6 +2561,30 @@ export default function (pi: ExtensionAPI) {
 					// nothing to do with it.
 					if (err instanceof Error && err.message.startsWith("agent_send: refused")) throw err;
 				}
+			}
+
+			// Revisione 41: agent_send used to report success (a real
+			// assignment_id, no warning of any kind) even when nobody was
+			// actually subscribed to receive it — an MQTT publish doesn't fail
+			// just because no one is listening. A planner that forgot to
+			// actually launch the target role's instance first (see
+			// prompts/planner.md, "Meccanismo di selezione", sezione 40) got no
+			// feedback at all until the agent_send timeout fired 30 minutes
+			// later (Revisione 30) — plenty of time to have already told the
+			// user "delegated to the coder" while no coder existed. Check
+			// presence NOW, before publishing, and surface a loud warning in
+			// the tool's own return value if nobody live matches the target.
+			// Still send regardless (the instance may be about to come online,
+			// or this presence snapshot may be a beat stale) — this only makes
+			// the silence visible immediately instead of half an hour later.
+			const liveMatch = params.target_instance
+				? presence.get(params.target_instance)?.status !== "offline" && presence.has(params.target_instance)
+				: [...presence.values()].some((c) => c.role === params.target_role && c.status !== "offline");
+			const noLiveTargetWarning = liveMatch
+				? null
+				: `⚠️ Nessuna istanza online per ${params.target_instance ? `"${params.target_instance}"` : `il ruolo "${params.target_role}"`} in questo progetto (verifica con agent_list). Il messaggio è stato pubblicato comunque, ma se non hai già lanciato quell'istanza (herdr agent start ...) nessuno lo riceverà mai — non trattare questo agent_send come una delega riuscita finché non confermi che l'istanza esiste davvero.`;
+			if (noLiveTargetWarning) {
+				logEvent("agent_send_no_live_target", { target: params.target_instance ?? `role:${params.target_role}` });
 			}
 
 			const assignment_id = ulid();
@@ -2478,8 +2683,11 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			return {
-				content: [{ type: "text" as const, text: `agent_send → ${entry.target}\nassignment_id ${assignment_id}` }],
-				details: { assignment_id, target: entry.target, hops },
+				content: [{
+					type: "text" as const,
+					text: `agent_send → ${entry.target}\nassignment_id ${assignment_id}${noLiveTargetWarning ? `\n\n${noLiveTargetWarning}` : ""}`,
+				}],
+				details: { assignment_id, target: entry.target, hops, no_live_target: !!noLiveTargetWarning },
 			};
 		},
 		renderCall(args, theme) {
@@ -2488,7 +2696,8 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, _options, theme) {
 			const d = result.details as any;
-			return new Text(theme.fg("success", "→ ") + theme.fg("accent", d?.target ?? "?") + theme.fg("dim", "  assignment_id ") + theme.fg("warning", d?.assignment_id ?? "?"), 0, 0);
+			const base = theme.fg("success", "→ ") + theme.fg("accent", d?.target ?? "?") + theme.fg("dim", "  assignment_id ") + theme.fg("warning", d?.assignment_id ?? "?");
+			return new Text(d?.no_live_target ? theme.fg("warning", "⚠ nessuna istanza online  ") + base : base, 0, 0);
 		},
 	});
 
@@ -2609,62 +2818,70 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// Revisione 42 — the code-level "kill" half of "kill blocked instances and
+	// recreate them": deterministic (no LLM judgment needed to actually make
+	// the target exit — MQTT delivery aside, the target's own handleTerminate()
+	// always runs the same clean-shutdown path), planner-only, and used both
+	// manually (planner decides an instance is wedged, e.g. after an
+	// agent_send that timed out) and automatically by watchdogSweep() for the
+	// opt-in WATCHDOG_AUTO_TERMINATE_* hard-stuck tier. "Recreate" is
+	// deliberately NOT this tool's job — see the honest-limit note on
+	// paseoDetectAndLog()/herdrRenamePane() above: there is no verified way
+	// for this extension to spawn a brand-new herdr pane/tmux session from
+	// inside another instance's process, so relaunching stays a planner
+	// action via the same Bash-driven mechanism already used for initial team
+	// selection (prompts/planner.md, "Selezione dinamica del team").
 	pi.registerTool({
-		name: "agent_control",
-		label: "Agent Control",
+		name: "agent_terminate",
+		label: "Agent Terminate",
 		description:
-			"Control-plane tool for piloting a worker process — deliberately SEPARATE from agent_send (the data plane, " +
-			"instructions the worker reads). Accepts ONLY an allowlisted set of verbs: launch, interrupt, relaunch, " +
-			"status. Never free-text, never raw keys — a verb outside the allow-list (config/control.json, default in " +
-			"DEFAULT_CONTROL_ALLOWLIST) is refused outright. 'status' is safe to call from here; the process-piloting verbs " +
-			"(launch/interrupt/relaunch) also require the target binary to be allowlisted. Planner-only for the verbs that " +
-			"actually pilot a process.",
+			"Force a peer instance to shut down cleanly RIGHT NOW (publishes offline presence, closes its MQTT connection, " +
+			"exits) — planner-only. Use this when an instance is confirmably wedged (e.g. agent_list still shows it, but an " +
+			"agent_send to it has already timed out, or a watchdog stall alert named it) and you've decided waiting longer " +
+			"isn't worth it. This does NOT relaunch anything — after calling this, you MUST relaunch the instance yourself " +
+			"(same herdr/tmux mechanism as when you first launched the team) before delegating to it again; if you don't, " +
+			"nothing will ever pick up its unfinished ticket. Best-effort delivery only: if the target is already gone, this " +
+			"is a harmless no-op (nobody receives it).",
 		parameters: Type.Object({
-			verb: Type.String({ description: "One of: launch, interrupt, relaunch, status." }),
-			target: Type.Optional(Type.String({ description: "Target instance or binary name, e.g. coder-01 (for launch/interrupt/relaunch)." })),
-			args: Type.Optional(Type.Array(Type.String(), {}), { description: "Additional argv, checked against the allow-list cli patterns." }),
+			target_instance: Type.String({ description: "Exact instance id to terminate, e.g. coder-01." }),
+			reason: Type.String({ description: "Why you're terminating it — recorded in the event log and shown to the target before it exits." }),
 		}),
 		async execute(_callId, params) {
-			if (!identity) throw new Error("orchestrator not initialised");
-			const allowlist = controlAllowlistConfig(identity.cwd);
-			if (!isControlVerbAllowed(params.verb, allowlist)) {
-				throw new Error(`agent_control: verb "${params.verb}" is not in the allow-list (${(allowlist.verbs).join(", ")}).`);
+			if (!identity || !client || !T) throw new Error("orchestrator not initialised");
+			if (identity.role !== "planner") {
+				throw new Error(`agent_terminate: only the planner role may terminate a peer instance (this instance is "${identity.role}").`);
 			}
-			if (params.verb === "status") {
-				const agents = [...presence.values()].map((c) => ({
-					instance: c.instance, role: c.role, status: c.status, load: (typeof c.current_load === "number" ? c.current_load : "?") + "/" + (typeof c.capacity === "number" ? c.capacity : "?"),
-				}));
-				logEvent("moa_control_status", { n: agents.length });
-				return {
-					content: [{ type: "text" as const, text: "agent_control status: " + (agents.length ? agents.map((a) => `${a.instance} (${a.role}) ${a.status} load=${a.load}`).join(", ") : "nessun agente noto.") }],
-					details: { agents },
-				};
+			if (params.target_instance === identity.instance) {
+				throw new Error("agent_terminate: refusing to terminate yourself — call this from a different instance, or just stop your own turn.");
 			}
-			// Process-piloting verbs: planner-only + allowlisted binary.
-			if (identity.role !== "planner") throw new Error(`agent_control: verb "${params.verb}" is planner-only (this instance is "${identity.role}").`);
-			const argv = [params.target ?? "", ...(params.args ?? [])].filter(Boolean);
-			if (argv.length === 0) throw new Error(`agent_control ${params.verb}: a target is required.`);
-			if (!isControlCliAllowed(params.verb, argv, allowlist)) {
-				throw new Error(`agent_control ${params.verb}: binary "${argv[0]}" is not allowlisted for verb "${params.verb}".`);
-			}
-			// The actual process action is best-effort and bounded, and must never
-			// hang a planner turn (tmux/herdr may or may not be present). We log
-			// the intent as an audit event regardless of whether the binary is
-			// available here, so the control attempt is traceable.
-			const postcond = await new Promise<boolean>((resolve) => {
-				execFile(argv[0], argv.slice(1), { timeout: 4000 }, (err) => resolve(!err));
-			});
-			logEvent("moa_control", { verb: params.verb, argv, ok: postcond });
+			const card = presence.get(params.target_instance);
+			const wasLive = !!card && card.status !== "offline";
+			const env: TerminateEnvelope = {
+				type: "terminate",
+				requested_by_instance: identity.instance,
+				requested_by_role: identity.role,
+				reason: params.reason,
+				timestamp: nowIso(),
+			};
+			await client.publishAsync(T.agentCommands(params.target_instance), JSON.stringify(env), { qos: 1 });
+			logEvent("agent_terminate_sent", { target: params.target_instance, reason: params.reason, was_live: wasLive });
 			return {
-				content: [{ type: "text" as const, text: `agent_control ${params.verb}: ${argv.join(" ")} → ${postcond ? "ok" : "postcondizione fallita (binary assente/non riuscita)"}` }],
-				details: { verb: params.verb, argv, postcondition_ok: postcond },
+				content: [{
+					type: "text" as const,
+					text:
+						`agent_terminate → ${params.target_instance}${wasLive ? "" : " (⚠️ nessuna presence online per questa istanza — probabile no-op)"}\n` +
+						"Verifica con agent_list tra qualche secondo che sia sparita, poi rilanciala tu (stesso meccanismo herdr/tmux della " +
+						"selezione del team) prima di delegare di nuovo — questo tool non rilancia nulla da solo.",
+				}],
+				details: { target: params.target_instance, was_live: wasLive },
 			};
 		},
 		renderCall(args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("agent_control ")) + theme.fg("accent", (args as any)?.verb ?? "?"), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold("agent_terminate ")) + theme.fg("accent", (args as any).target_instance ?? "?"), 0, 0);
 		},
 		renderResult(result, _options, theme) {
-			return new Text(theme.fg("accent", `→ ${(result.details as any)?.verb ?? "?"}`), 0, 0);
+			const d = result.details as any;
+			return new Text((d?.was_live ? theme.fg("warning", "⚠ ") : "") + theme.fg("success", "→ terminate inviato a ") + theme.fg("accent", d?.target ?? "?"), 0, 0);
 		},
 	});
 
@@ -2936,9 +3153,19 @@ export default function (pi: ExtensionAPI) {
 			"Merge a task's worktree branch back into the project's main checkout — call this ONLY once the whole " +
 			"planner→coder→reviewer→planner cycle has concluded with planner satisfied (the final report is being written). " +
 			"Commits anything left uncommitted in the worktree first (a safety net — coder/reviewer should already be committing " +
-			"as they go), then merges task/<slug> into the current branch of the main project directory and removes the worktree. " +
-			"On a merge conflict, aborts the merge cleanly (main checkout is left untouched) and leaves the worktree in place for " +
-			"manual resolution instead of guessing at a fix — report this to the user rather than retrying blindly.\n\n" +
+			"as they go), then merges task/<slug> into the current branch of the main project directory, pushes to the remote " +
+			"(unless push:false), and removes the worktree. On a merge conflict, aborts the merge cleanly (main checkout is left " +
+			"untouched) and leaves the worktree in place for manual resolution instead of guessing at a fix — report this to the " +
+			"user rather than retrying blindly.\n\n" +
+			"Revisione 42 — mandatory closing procedure, enforced here rather than left to prompt discipline alone: this call is " +
+			"REFUSED unless you explicitly declare (a) user_confirmed:true — you asked the user whether this result is what they " +
+			"actually wanted and they said yes, don't assume it from silence; (b) either e2e_tests_run:true (the project's " +
+			"end-to-end/full test suite was actually run as part of this task, by coder/reviewer/e2e-simulator — not by you) or " +
+			"e2e_tests_skipped_reason explaining why none applies (e.g. a pure-docs task with no e2e suite to run); (c) either " +
+			"version_bumped:true (the project's own version marker was bumped as part of this task) or " +
+			"version_bump_skipped_reason explaining why not. These are self-declarations, not independently verified by this " +
+			"tool — but an explicit false/lie is now on the record in the event log, instead of the step simply never having " +
+			"been considered at all.\n\n" +
 			"On success, if a .env with Evolution API settings is present (see .env.example, Revisione 19), this also sends a " +
 			"WhatsApp completion notification automatically — you don't need to call notify_whatsapp yourself for the normal " +
 			"case. Pass notify_message to customize the text; otherwise a sensible default naming the task is sent. If the .env " +
@@ -2947,11 +3174,45 @@ export default function (pi: ExtensionAPI) {
 			slug: Type.String({ description: "Same slug passed to worktree_create for this task." }),
 			commit_message: Type.Optional(Type.String({ description: "Commit message for any uncommitted changes and for the merge commit. Defaults to a generic message referencing the slug." })),
 			notify_message: Type.Optional(Type.String({ description: "Custom WhatsApp completion message. Defaults to a generic one naming the task slug." })),
+			user_confirmed: Type.Boolean({ description: "You explicitly asked the user to confirm this result is what they wanted, and they confirmed — required, no exceptions." }),
+			e2e_tests_run: Type.Optional(Type.Boolean({ description: "The project's end-to-end/full test suite was actually run as part of this task." })),
+			e2e_tests_skipped_reason: Type.Optional(Type.String({ description: "Required if e2e_tests_run is not true: why no e2e run applies to this task." })),
+			version_bumped: Type.Optional(Type.Boolean({ description: "The project's own version marker (package.json or equivalent) was bumped as part of this task." })),
+			version_bump_skipped_reason: Type.Optional(Type.String({ description: "Required if version_bumped is not true: why no version bump applies to this task." })),
+			push: Type.Optional(Type.Boolean({ description: "Push the main branch to its remote after a successful merge. Defaults to true — set false only if you deliberately don't want this task pushed yet." })),
 		}),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("orchestrator not initialised");
 			const slug = params.slug;
 			if (!SLUG_RE.test(slug)) throw new Error(`worktree_finalize: "${slug}" is not a valid kebab-case slug.`);
+			if (!params.user_confirmed) {
+				throw new Error(
+					"worktree_finalize: refused — user_confirmed must be true. Ask the user explicitly whether this task's result " +
+						"is what they wanted BEFORE finalizing (Revisione 42) — don't assume completion just because every ticket is " +
+						"done. Once they've confirmed, call this again with user_confirmed: true.",
+				);
+			}
+			if (!params.e2e_tests_run && !params.e2e_tests_skipped_reason) {
+				throw new Error(
+					"worktree_finalize: refused — pass e2e_tests_run:true (the project's end-to-end/full test suite actually ran) " +
+						"or e2e_tests_skipped_reason explaining why none applies to this task (Revisione 42 — a completed task now " +
+						"needs this decision made explicit, not silently skipped).",
+				);
+			}
+			if (!params.version_bumped && !params.version_bump_skipped_reason) {
+				throw new Error(
+					"worktree_finalize: refused — pass version_bumped:true (the project's own version marker was bumped as part of " +
+						"this task) or version_bump_skipped_reason explaining why not (Revisione 42).",
+				);
+			}
+			logEvent("worktree_finalize_checklist", {
+				slug,
+				user_confirmed: params.user_confirmed,
+				e2e_tests_run: !!params.e2e_tests_run,
+				e2e_tests_skipped_reason: params.e2e_tests_skipped_reason ?? null,
+				version_bumped: !!params.version_bumped,
+				version_bump_skipped_reason: params.version_bump_skipped_reason ?? null,
+			});
 			await assertGitRepo(identity.cwd);
 			const { path: wtPath, branch } = worktreePaths(identity.cwd, slug);
 
@@ -3060,6 +3321,30 @@ export default function (pi: ExtensionAPI) {
 
 			logEvent("worktree_finalize", { slug, worktree_path: wtPath, branch, merged: true, conflict: false });
 
+			// Revisione 42 — "push" is the missing last step of the closing
+			// procedure the operator asked for: worktree_finalize merged into the
+			// main checkout's CURRENT branch already, but never pushed it to the
+			// remote, so "commit, push" only ever happened if the planner
+			// remembered to run git push by hand afterwards. Defaults to true
+			// (the new standard closing behavior); best-effort and NEVER allowed
+			// to affect the merge result above, which has already happened
+			// regardless — a missing/unreachable remote, no upstream configured,
+			// or a rejected push (e.g. someone else pushed first) is reported back
+			// in the text, not thrown, so a planner working on a project with no
+			// remote at all (a fresh po init before the user ever added one)
+			// doesn't get a merge it can't recover from.
+			let pushResult: { ok: boolean; detail: string } = { ok: false, detail: "push:false — non richiesto" };
+			if (params.push !== false) {
+				try {
+					const currentBranch = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], identity.cwd);
+					await execGit(["push", "origin", currentBranch.stdout.trim()], identity.cwd);
+					pushResult = { ok: true, detail: "push riuscito" };
+				} catch (err) {
+					pushResult = { ok: false, detail: err instanceof Error ? err.message : String(err) };
+				}
+				logEvent("worktree_finalize_push", { slug, ok: pushResult.ok, detail: pushResult.detail });
+			}
+
 			// WhatsApp completion notification (Revisione 19) — best-effort, only
 			// on the success path, never allowed to affect the merge result above
 			// (which has already happened by this point regardless of what
@@ -3083,9 +3368,10 @@ export default function (pi: ExtensionAPI) {
 				content: [{
 					type: "text" as const,
 					text: `worktree_finalize: merged ${branch} into the main checkout and removed the worktree.` +
+						(params.push === false ? " Push saltato (push:false)." : pushResult.ok ? " Push al remote riuscito." : ` Push NON riuscito: ${pushResult.detail}.`) +
 						(notifyResult.ok ? " WhatsApp notification sent." : ` (WhatsApp notification not sent: ${notifyResult.detail})`),
 				}],
-				details: { merged: true, conflict: false, worktree_path: wtPath, branch, whatsapp_notified: notifyResult.ok },
+				details: { merged: true, conflict: false, worktree_path: wtPath, branch, whatsapp_notified: notifyResult.ok, pushed: pushResult.ok },
 			};
 		},
 		renderCall(args, theme) {
@@ -3957,10 +4243,21 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Claim a READY ticket to work on it — sets it to running and assigns it to this instance. Refuses if the " +
 			"ticket isn't READY (blocked on dependencies, already running, done, etc.), or if it declares " +
-			"required_capabilities this instance's role+skills don't cover.",
+			"required_capabilities this instance's role+skills don't cover. Planner-EXCLUDED (Revisione 42): the planner " +
+			"never claims ticket work itself — see docs/development-notes.md Revisione 42 for the real incident (a missing " +
+			"coder led the planner to just do the coding itself instead of relaunching one) this closes structurally, not " +
+			"just by instruction. If no live instance of the required role exists, relaunch one — never claim its ticket.",
 		parameters: Type.Object({ ticket_id: Type.String() }),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("orchestrator not initialised");
+			if (identity.role === "planner") {
+				throw new Error(
+					"ticket_claim: the planner role may never claim a ticket — planning and delegating is the whole job, doing the " +
+						"work yourself (even once, even to unblock a missing/dead instance) is exactly the failure Revisione 42 closed. " +
+						"Relaunch the instance whose role this ticket needs (same herdr/tmux mechanism as initial team selection), " +
+						"then let THAT instance call ticket_claim.",
+				);
+			}
 			const storage = ensureMoaStorage();
 			const ticket = storage.getTicket(params.ticket_id);
 			if (!ticket) throw new Error(`ticket_claim: no ticket "${params.ticket_id}".`);
@@ -3981,6 +4278,12 @@ export default function (pi: ExtensionAPI) {
 			storage.recordEvent(ticket.run_id, "ticket_started", { ticket_id: ticket.id, assigned_instance: identity.instance }, ticket.id);
 			logEvent("moa_ticket_claimed", { run_id: ticket.run_id, ticket_id: ticket.id });
 			await moaPublishEvent(ticket.run_id, "ticket_started", { ticket_id: ticket.id, assigned_instance: identity.instance });
+			// Revisione 40 — see activeTicketIds declaration: this instance is now
+			// genuinely doing ticket work regardless of whatever inboundQueue looks
+			// like, so the MQTT presence widget must reflect that immediately, not
+			// wait for the next heartbeat tick.
+			activeTicketIds.add(ticket.id);
+			void publishPresence(computeSelfStatus());
 			return {
 				content: [{ type: "text" as const, text: `ticket_claim: "${ticket.title}" (${ticket.id}) claimed by ${identity.instance}.` }],
 				details: { ticket: updated },
@@ -4000,10 +4303,13 @@ export default function (pi: ExtensionAPI) {
 		label: "Ticket Complete",
 		description:
 			"Mark a ticket done or failed and report the result. Only the instance that claimed it (or planner, who may " +
-			"override) may call this. On \"done\", recomputes which dependent tickets just became READY and publishes " +
-			"ticket_ready for each; if every ticket in the run is now done, the run itself is marked completed. On " +
-			"\"failed\", dependents stay blocked — no automatic cascade (replanning to route around a failure is deferred, " +
-			"see docs/development-notes.md Revisione 26).",
+			"override) may call this — BY DESIGN it is normally the planner who calls this, not the worker: a ticket " +
+			"represents a role's contribution to a phase, and that contribution is only truly \"done\" once the planner is " +
+			"satisfied (see prompts/planner.md — call this alongside plan_advance, for every ticket in the phase you're " +
+			"closing, not just whichever instance woke you last). On \"done\", recomputes which dependent tickets just " +
+			"became READY and publishes ticket_ready for each; if every ticket in the run is now done, the run itself is " +
+			"marked completed. On \"failed\", dependents stay blocked — no automatic cascade (replanning to route around a " +
+			"failure is deferred, see docs/development-notes.md Revisione 26).",
 		parameters: Type.Object({
 			ticket_id: Type.String(),
 			status: Type.Union([Type.Literal("done"), Type.Literal("failed")]),
@@ -4022,6 +4328,25 @@ export default function (pi: ExtensionAPI) {
 			storage.recordEvent(ticket.run_id, params.status === "done" ? "ticket_done" : "ticket_failed", { ticket_id: ticket.id, result_summary: params.result_summary ?? null }, ticket.id);
 			logEvent("moa_ticket_completed", { run_id: ticket.run_id, ticket_id: ticket.id, status: params.status });
 			await moaPublishEvent(ticket.run_id, params.status === "done" ? "ticket_done" : "ticket_failed", { ticket_id: ticket.id });
+			// Revisione 40 — counterpart of the activeTicketIds.add() in
+			// ticket_claim: this ticket is no longer "why this instance is busy"
+			// (done or failed, either way the running work stopped), so drop it
+			// and re-publish immediately rather than waiting for the next
+			// heartbeat — same reasoning as ticket_claim above.
+			//
+			// Honest limit: activeTicketIds is per-process (this instance's own
+			// closure), so this only clears correctly when the SAME instance that
+			// claimed the ticket also completes it. The tool description above
+			// explicitly allows the planner to override and complete a ticket on
+			// another instance's behalf (e.g. after a watchdog stall) — in that
+			// case this delete runs on the PLANNER's own set (a no-op) and the
+			// original assignee's presence stays "busy" until that instance's own
+			// process exits or otherwise republishes. Fixing that fully would mean
+			// tracking per-ticket ownership centrally (MQTT/SQLite) rather than in
+			// each instance's local memory — out of scope for this incident, which
+			// was a same-instance claim→complete flow throughout.
+			activeTicketIds.delete(ticket.id);
+			void publishPresence(computeSelfStatus());
 
 			const newlyReady: string[] = [];
 			if (params.status === "done") {
@@ -4082,8 +4407,7 @@ export default function (pi: ExtensionAPI) {
 			const waves = moaComputeExecutionWaves(tickets, deps);
 			const events = storage.listEvents(params.run_id, { limit: 50 });
 			const stalled = moaFindStalledTickets(storage, identity.project, Date.now(), WATCHDOG_STALL_MS).filter((s) => s.run_id === params.run_id);
-			const openHolds = storage.listDecisionHolds(params.run_id).filter((h) => h.status === "open");
-			const checkpoints = storage.listCheckpoints(params.run_id);
+			const unfinalized = moaFindUnfinalizedRuns(storage, identity.project, Date.now(), WATCHDOG_FINALIZE_GRACE_MS).filter((r) => r.run_id === params.run_id);
 			return {
 				content: [
 					{
@@ -4091,10 +4415,11 @@ export default function (pi: ExtensionAPI) {
 						text:
 							`run "${run.id}" (${run.status}, domain: ${run.domain}): ${tickets.length} ticket(s) — ` +
 							`${buckets.done.length} done, ${buckets.running.length} running, ${buckets.ready.length} ready, ${buckets.blocked.length} blocked, ${buckets.failed.length} failed.` +
-							(stalled.length ? `\n⚠️ ${stalled.length} ticket bloccato/i: ${stalled.map((s) => `${s.ticket_id} (${Math.round(s.elapsed_ms / 60_000)} min, ${s.assigned_instance ?? "?"})`).join(", ")}.` : ""),
+							(stalled.length ? `\n⚠️ ${stalled.length} ticket bloccato/i: ${stalled.map((s) => `${s.ticket_id} (${Math.round(s.elapsed_ms / 60_000)} min, ${s.assigned_instance ?? "?"})`).join(", ")}.` : "") +
+							(unfinalized.length ? `\n⚠️ run completato da ${Math.round(unfinalized[0].elapsed_ms / 60_000)} min senza finalize/notifica — verifica se worktree_finalize va ancora chiamato.` : ""),
 					},
 				],
-				details: { run, tickets, dependencies: deps, ...buckets, waves, recent_events: events, stalled_tickets: stalled, open_holds: openHolds, checkpoints },
+				details: { run, tickets, dependencies: deps, ...buckets, waves, recent_events: events, stalled_tickets: stalled, unfinalized_run: unfinalized.length > 0 },
 			};
 		},
 		renderCall(args, theme) {
@@ -4118,140 +4443,48 @@ export default function (pi: ExtensionAPI) {
 			"the whole time). Any role may call this on demand — useful right after resuming a session, or just to check. " +
 			"The automatic background sweep (planner instance only) additionally records a ticket_stalled event, notifies " +
 			"the user via WhatsApp, and wakes the planner's own turn with an actionable message the first time a given " +
-			"running episode crosses each stall-threshold multiple — this manual tool only reports, it never escalates.",
+			"running episode crosses each stall-threshold multiple — this manual tool only reports, it never escalates. " +
+			"Also reports runs stuck \"completed\" with no worktree_finalize/notification follow-up for more than " +
+			`${Math.round(WATCHDOG_FINALIZE_GRACE_MS / 60_000)} minutes (Revisione 40) — a run can auto-complete the moment ` +
+			"its last ticket is done, independently of whether the planner ever actually merged/notified. And — Revisione 42 — " +
+			"any RUNNING ticket whose assigned instance has no live MQTT presence right now (confirmably disconnected, not " +
+			"just slow): by the time you see one here it's already been auto-marked \"failed\" by the background watchdog, " +
+			"this just surfaces which instance you still need to relaunch.",
 		parameters: Type.Object({ run_id: Type.Optional(Type.String({ description: "Limit to one run; omit to check every active run for this project." })) }),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("orchestrator not initialised");
 			const storage = ensureMoaStorage();
 			const all = moaFindStalledTickets(storage, identity.project, Date.now(), WATCHDOG_STALL_MS);
 			const stalled = params.run_id ? all.filter((s) => s.run_id === params.run_id) : all;
+			const allUnfinalized = moaFindUnfinalizedRuns(storage, identity.project, Date.now(), WATCHDOG_FINALIZE_GRACE_MS);
+			const unfinalized = params.run_id ? allUnfinalized.filter((r) => r.run_id === params.run_id) : allUnfinalized;
+			const allOrphaned = moaFindOrphanedTickets(storage, identity.project, presence);
+			const orphaned = params.run_id ? allOrphaned.filter((o) => o.run_id === params.run_id) : allOrphaned;
+			const lines = [
+				...stalled.map((s) => `⚠️ ${s.ticket_id} "${s.title}" — assegnato a ${s.assigned_instance ?? "?"}, running da ${Math.round(s.elapsed_ms / 60_000)} min.`),
+				...unfinalized.map((r) => `⚠️ run ${r.run_id} "${r.objective}" — completato da ${Math.round(r.elapsed_ms / 60_000)} min, nessun finalize/notifica risulta ancora arrivato.`),
+				...orphaned.map((o) => `🔴 ${o.ticket_id} "${o.title}" — assegnato a "${o.assigned_instance}", OFFLINE (nessuna presence viva). Rilanciala prima di ripianificare.`),
+			];
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text:
-							stalled.length === 0
-								? "run_watchdog_check: nessun ticket bloccato."
-								: stalled.map((s) => `⚠️ ${s.ticket_id} "${s.title}" — assegnato a ${s.assigned_instance ?? "?"}, running da ${Math.round(s.elapsed_ms / 60_000)} min.`).join("\n"),
+						text: lines.length === 0 ? "run_watchdog_check: nessun blocco (né ticket, né run non finalizzati, né istanze offline)." : lines.join("\n"),
 					},
 				],
-				details: { stalled },
+				details: { stalled, unfinalized, orphaned },
 			};
 		},
 		renderCall(_args, theme) {
 			return new Text(theme.fg("toolTitle", theme.bold("run_watchdog_check")), 0, 0);
 		},
 		renderResult(result, _options, theme) {
-			const n = ((result.details as any)?.stalled ?? []).length;
+			const n = ((result.details as any)?.stalled ?? []).length + ((result.details as any)?.unfinalized ?? []).length;
 			return n === 0 ? new Text(theme.fg("success", "→ nessun blocco"), 0, 0) : new Text(theme.fg("warning", `→ ${n} bloccat${n === 1 ? "o" : "i"}`), 0, 0);
 		},
 	});
 
 	// ━━ agent_end: capture turn output and publish the response ━━━━━━━━━━
-	pi.registerTool({
-		name: "decision_hold_create",
-		label: "Decision Hold Create",
-		description:
-			"Open a durable human-approval gate (firstmate decision-hold pattern) for a decision that needs an explicit " +
-			"operator answer before dependent work may proceed — e.g. preflight credentials (will you provide them now " +
-			"or in parallel?), destructive/approval-gated steps. The hold is a SQLite row: it survives restarts (it is " +
-			"re-read by run_status, never remembered by the planner), and closes EXACTLY once via a recorded explicit " +
-			"decision (decision_hold_resolve) — never automatically. Planner-only to open.",
-		parameters: Type.Object({
-			question: Type.String({ description: "The decision or question the operator must answer." }),
-			run_id: Type.Optional(Type.String({ description: "Run this hold belongs to, if any." })),
-			ticket_id: Type.Optional(Type.String({ description: "Ticket this hold gates, if any." })),
-			context: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		}),
-		async execute(_callId, params) {
-			if (!identity) throw new Error("orchestrator not initialised");
-			if (identity.role !== "planner") throw new Error(`decision_hold_create: only the planner role may open an approval hold (this instance is "${identity.role}").`);
-			const storage = ensureMoaStorage();
-			if (params.run_id && !storage.getRun(params.run_id)) throw new Error(`decision_hold_create: no run "${params.run_id}".`);
-			const hold = storage.createDecisionHold({ run_id: params.run_id ?? `adhoc_${identity.project}`, ticket_id: params.ticket_id, question: params.question, context: params.context });
-			if (params.run_id) {
-				storage.recordEvent(params.run_id, "decision_hold_opened", { hold_id: hold.id, question: hold.question }, params.ticket_id ?? null);
-				await moaPublishEvent(params.run_id, "decision_hold_opened", { hold_id: hold.id, question: hold.question });
-			}
-			logEvent("moa_hold_opened", { hold_id: hold.id, question: hold.question });
-			return { content: [{ type: "text" as const, text: `decision_hold_create: hold "${hold.id}" opened — ${hold.question}` }], details: { hold } };
-		},
-		renderCall(args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("decision_hold_create ")) + theme.fg("accent", (args as any)?.question ?? "?"), 0, 0);
-		},
-		renderResult(result, _options, theme) {
-			const hold = (result.details as any)?.hold;
-			return new Text(theme.fg("success", "→ open ") + theme.fg("accent", hold?.id ?? "?"), 0, 0);
-		},
-	});
-
-	pi.registerTool({
-		name: "decision_hold_list",
-		label: "Decision Hold List",
-		description:
-			"List durable approval holds, optionally filtered by run_id. Open holds are the pending human decisions that " +
-			"gate dependent work — surfaced in run_status too. Any role may call this (read-only).",
-		parameters: Type.Object({ run_id: Type.Optional(Type.String({ description: "Limit to one run; omit for all holds." })) }),
-		async execute(_callId, params) {
-			if (!identity) throw new Error("orchestrator not initialised");
-			const storage = ensureMoaStorage();
-			const holds = storage.listDecisionHolds(params.run_id);
-			return { content: [{ type: "text" as const, text: holds.length ? `decision_hold_list: ${holds.length} hold(s).` : "decision_hold_list: nessun hold." }], details: { holds } };
-		},
-		renderCall(_args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("decision_hold_list")), 0, 0);
-		},
-		renderResult(result, _options, theme) {
-			const holds = ((result.details as any)?.holds ?? []);
-			return new Text(theme.fg(holds.length ? "accent" : "success", `→ ${holds.length} hold(s)`), 0, 0);
-		},
-	});
-
-	pi.registerTool({
-		name: "decision_hold_resolve",
-		label: "Decision Hold Resolve",
-		description:
-			"Record an explicit operator decision that closes a durable approval hold. The hold closes exactly once, with the " +
-			"resolving instance and the decision text persisted — the gate never auto-resolves, and after this it cannot be " +
-			"resolved again. This is the ONLY way a hold stops blocking. Call it with the operator's actual answer, not what the " +
-			"planner 'remembers' the answer might be.",
-		parameters: Type.Object({ hold_id: Type.String(), decision: Type.String() }),
-		async execute(_callId, params) {
-			if (!identity) throw new Error("orchestrator not initialised");
-			const storage = ensureMoaStorage();
-			const hold = storage.getDecisionHold(params.hold_id);
-			if (!hold) throw new Error(`decision_hold_resolve: no hold "${params.hold_id}".`);
-			const updated = storage.resolveDecisionHold(params.hold_id, identity.instance, params.decision);
-			storage.recordEvent(hold.run_id, "decision_hold_resolved", { hold_id: hold.id, decision: params.decision, resolved_by: identity.instance });
-			await moaPublishEvent(hold.run_id, "decision_hold_resolved", { hold_id: hold.id, decision: params.decision });
-			logEvent("moa_hold_resolved", { hold_id: hold.id, decision: params.decision, resolved_by: identity.instance });
-			return { content: [{ type: "text" as const, text: `decision_hold_resolve: "${hold.id}" → ${updated.status} (${params.decision}, by ${identity.instance}).` }], details: { hold: updated } };
-		},
-		renderCall(args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("decision_hold_resolve ")) + theme.fg("accent", `${(args as any)?.hold_id ?? "?"} → ${(args as any)?.decision ?? "?"}`), 0, 0);
-		},
-		renderResult(result, _options, theme) {
-			const hold = (result.details as any)?.hold;
-			return new Text(theme.fg("success", `→ ${hold?.status ?? "?"} by `) + theme.fg("accent", hold?.resolved_by ?? "?"), 0, 0);
-		},
-	});
-
-	// Semantic per-harness liveness signal (Ticket 05). Pi exposes turn-level
-	// tool-execution lifecycle events; logging the START of each tool call gives
-	// a high-frequency, low-noise "the model is actively tooling" marker. A stall
-	// watcher (scripts/watch-stalls.mjs) or the planner's own sweep can read it
-	// from the instance JSONL log to classify a running ticket as "slow" (recent
-	// tools) vs "blocked" (a hung turn — the Revisione 29 incident) without any
-	// LLM turn. appendEntry is state-persistence only, never sent to the LLM.
-	pi.on("tool_execution_start", (_event, _ctx) => {
-		if (!identity) return;
-		try {
-			const tool = ((_event as any)?.toolName ?? "?") as string;
-			pi.appendEntry("orchestrator-log", { event: "tool_execution_start", instance: identity.instance, tool });
-			logEvent("tool_execution_start", { tool });
-		} catch { /* best-effort */ }
-	});
-
 	pi.on("agent_end", async (_event, ctx) => {
 		if (identity) herdrReportAgent(identity.displayName, "idle", identity.instance);
 		const inbound = [...inboundQueue.values()].reverse().find((i) => !i.fulfilled);
@@ -4295,7 +4528,7 @@ export default function (pi: ExtensionAPI) {
 			inboundQueue.delete(inbound.assignment_id);
 			if (currentInbound === inbound) currentInbound = null;
 			pi.appendEntry("orchestrator-log", { event: "response_sent", assignment_id: inbound.assignment_id });
-			void publishPresence(inboundQueue.size > 0 ? "busy" : "idle");
+			void publishPresence(computeSelfStatus());
 		} catch (err) {
 			pi.appendEntry("orchestrator-log", { event: "response_send_failed", assignment_id: inbound.assignment_id, error: err instanceof Error ? err.message : String(err) });
 		}
@@ -4307,7 +4540,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const trimmed = (args ?? "").trim();
 			if (trimmed === "refresh") {
-				await publishPresence(inboundQueue.size > 0 ? "busy" : "idle");
+				await publishPresence(computeSelfStatus());
 			}
 			try {
 				ctx.ui.notify(`orchestrator: ${presence.size} peer(s), ${activityLog.length} recent event(s)`, "info");

@@ -6,6 +6,340 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 42 — istanze morte rilevate subito (non più dopo 15-30 min), planner strutturalmente escluso da `ticket_claim`, kill/relaunch, chiusura task obbligatoria (conferma utente + e2e + version bump + commit + push)
+
+**Richiesta esplicita dell'operatore, tre punti in un solo messaggio**, dopo aver
+osservato di persona (progetto "code-mem", lo stesso della Revisione 41) che un
+planner ripreso da un riavvio, trovando un coder assente, **ha semplicemente
+fatto lui il lavoro di coding** invece di rilanciarne uno:
+
+1. Un "servizio deterministico" che tenga sotto controllo istanze previste vs
+   effettivamente aperte, rilevi istanze bloccate/sparite, e le termini/permetta
+   di ricrearle — **senza dover aspettare 30 minuti**.
+2. **Il planner DEVE fare solo il planner** — mai coding, mai review, mai il
+   lavoro di un altro ruolo, in nessuna circostanza (istanza assente inclusa).
+3. A fine task, il planner deve **chiedere conferma del completamento
+   all'utente**, poi eseguire in automatico test e2e, bump versione, commit,
+   push.
+
+### Punto 1 — rilevamento istantaneo + kill/relaunch
+
+I due controlli watchdog esistenti (Revisione 29: ticket `running` senza
+`ticket_complete` da 15+ minuti; Revisione 40: run `completed` senza finalize
+da 10+ minuti) condividono lo stesso limite: sono euristiche sul tempo
+trascorso, perché l'unico segnale che avevano era "nessun evento arriva più".
+Ma per il caso specifico di un'istanza CHE NON C'È PIÙ (pane herdr chiuso,
+processo `pi` morto — non "lento", proprio assente), esiste un segnale
+migliore e già disponibile: la presenza MQTT (retained, alimentata da LWT +
+`staleSweepTimer` lato client, che la pota dopo `STALE_AFTER_MS` ~45s di
+silenzio). Non è un'euristica, è un fatto: se l'istanza assegnataria di un
+ticket `running` non ha una presence card viva, è confermabilmente
+disconnessa, punto.
+
+Nuova funzione pura `moaFindOrphanedTickets(storage, project, presenceSnapshot)`
+(stesso stile testabile di `moaFindStalledTickets`/`moaFindUnfinalizedRuns`,
+nessuna soglia di tempo richiesta) integrata nello sweep automatico del
+planner (`watchdogSweep`, ogni `WATCHDOG_INTERVAL_MS`, default 2 min): un
+ticket "orfano" viene **automaticamente marcato `failed`** (con
+`result_summary` che spiega perché), pubblicato su `run_events`, e il planner
+viene svegliato con un messaggio `[watchdog]` che questa volta non è un
+suggerimento ma un'istruzione obbligatoria: rilancia SUBITO quell'istanza,
+poi ripianifica — **mai fare tu il lavoro del ticket**. Nella pratica questo
+si rileva entro 1-2 minuti dalla disconnessione reale, non 15-30. WhatsApp
+notificato come per gli altri controlli.
+
+Per il caso diverso (istanza ANCORA connessa ma bloccata da tempo — il
+vecchio caso Revisione 29), nuovo tool **`agent_terminate({ target_instance,
+reason })`** (planner-only): pubblica un controllo `type: "terminate"` sullo
+STESSO topic comandi già usato da `agent_send`/`handleCommand` — l'istanza
+target, ricevendolo, esegue lo stesso `cleanShutdown()` di un
+`session_shutdown` pulito e poi esce (`process.exit`). Non rilancia nulla da
+solo: dopo, va verificato con `agent_list` e rilanciata manualmente (stesso
+meccanismo herdr/tmux della selezione iniziale del team — nessun modo
+verificato per questa estensione di generare un nuovo pane/processo dall'interno,
+stesso limite onesto già documentato per herdr/paseo). Esiste anche una
+terminazione automatica opt-in (`PI_ORCH_WATCHDOG_AUTO_TERMINATE=true`,
+default **disattivato**): un ticket ancora "running" oltre
+`PI_ORCH_WATCHDOG_AUTO_TERMINATE_MS` (default 20 min, ben sotto i 30 min del
+timeout di `agent_send`) con presenza ANCORA viva riceve una terminazione
+automatica, codice puro, nessun giudizio LLM richiesto. Deliberatamente NON
+attivo di default: a differenza del caso orfano sopra (un'istanza già
+sparita, niente da perdere), terminare un processo ANCORA in esecuzione
+rischia di uccidere un task genuinamente lento ma che sta progredendo — un
+trade-off che l'operatore deve scegliere consapevolmente, non qualcosa che
+questo pacchetto decide da solo alle sue spalle.
+
+### Punto 2 — planner strutturalmente escluso da `ticket_claim`
+
+`prompts/planner.md` documentava già (Revisione 26) che è sempre e solo
+un'istanza worker a dover chiamare `ticket_claim` ("deve essere lei a
+chiamarlo, non tu") — ma era solo una convenzione di prompt, mai imposta dal
+codice. Ora `ticket_claim` **rifiuta esplicitamente il ruolo planner**, con
+un errore che spiega perché e cosa fare invece (rilanciare l'istanza del
+ruolo giusto). Questo chiude strutturalmente il caso specifico
+dell'incidente: il planner non ha modo di "prendere in carico" da solo il
+lavoro di un ticket.
+
+**Cosa NON è cambiato, e perché** — un tentativo iniziale in questa stessa
+revisione aveva anche ristretto l'override del planner su `ticket_complete`
+(bloccando `status: "done"` su un ticket di un'altra istanza, lasciando solo
+`"failed"`). Rileggendo `prompts/planner.md` con più attenzione prima di
+consegnare, questo si è rivelato un errore di analisi: il documento descrive
+esplicitamente **il planner come il chiamante normale e previsto di
+`ticket_complete`**, non un override d'emergenza — "`ticket_complete` invece
+lo chiami TU, il planner — mai il worker[...] quel contributo si considera
+concluso solo quando TU lo giudichi tale". È così by design fin dalla
+Revisione 26: un ticket rappresenta il contributo di un ruolo a una fase, e
+quel contributo è "fatto" solo quando il planner lo giudica tale (lo stesso
+momento in cui chiama `plan_advance`) — bloccare questo avrebbe rotto il
+flusso normale previsto, non solo l'incidente. Il revert è stato fatto PRIMA
+di consegnare, non dopo un bug report — la lezione: l'incidente reale era il
+planner che scriveva codice di persona via Bash/Edit, MAI passando da
+`ticket_claim` per cominciare — bloccare `ticket_claim` da solo chiude
+esattamente quel buco, senza bisogno di toccare `ticket_complete`.
+
+**Limite onesto, non risolto da questa revisione**: non esiste, in questa
+estensione Pi, alcun modo verificato per impedire a un'istanza planner di
+usare i tool nativi di Pi (Bash/Edit/Write) per scrivere codice direttamente
+— quei tool non sono registrati da questa estensione, e non è emersa nessuna
+API dell'`ExtensionAPI` per limitarli per ruolo (stessa onestà già applicata
+altrove in questo file per herdr/paseo: mai inventare una superficie API mai
+verificata). La difesa resta quindi a più livelli: regola esplicita e molto
+rafforzata in `prompts/planner.md` (sezione dedicata, in cima al file),
+`ticket_claim` bloccato per planner, e la nuova rilevazione/istruzione
+obbligatoria di rilancio sopra — non un blocco tecnico assoluto e garantito
+al 100% contro un planner che ignora tutto questo.
+
+### Punto 3 — chiusura task obbligatoria: conferma utente, e2e, version bump, push
+
+`worktree_finalize` ora **rifiuta la chiamata** se non vengono dichiarati
+esplicitamente tre nuovi parametri: `user_confirmed: true` (nessuna
+eccezione — il planner deve aver chiesto esplicitamente conferma
+all'utente prima di finalizzare, non assumerla dal fatto che tutti i ticket
+sono `done`), ed **`e2e_tests_run: true` oppure `e2e_tests_skipped_reason`**
+e **`version_bumped: true` oppure `version_bump_skipped_reason`** (per i task
+che genuinamente non si applicano, es. un task di sola documentazione). Sono
+autodichiarazioni — questo tool non esegue né verifica indipendentemente i
+test o il version bump di un progetto arbitrario (stack/tooling troppo
+variabili tra progetti diversi per automatizzarlo in modo sicuro qui dentro)
+— ma un `false`/una bugia resta ora tracciata nell'event log
+(`worktree_finalize_checklist`), invece che il passaggio non essere mai
+stato nemmeno considerato.
+
+Separatamente, `worktree_finalize` ora **esegue anche `git push` al remote**
+dopo un merge riuscito (default `push: true`, disattivabile con `push:
+false`) — prima faceva solo il merge locale, "commit, push" a fine task
+richiedeva che il planner se ne ricordasse a parte. Best-effort e mai in
+grado di invalidare il merge già avvenuto: nessun remote configurato, push
+rifiutato, ecc. vengono riportati nel testo di risposta, non lanciati come
+eccezione.
+
+**Verifica**: nuovo file `scripts/smoke-test-instance-liveness.mjs` (14
+asserzioni) copre tutti e tre i punti con la REALE `extensions/orchestrator.ts`
+contro un broker Mosquitto reale: rilevamento orfano + auto-fail + messaggio
+di rilancio obbligatorio; `ticket_claim` rifiutato per planner;
+`ticket_complete` confermato INVARIATO (regression guard esplicita, non solo
+assenza di errori); `agent_terminate` che forza un vero `cleanShutdown()`
+osservabile via presence MQTT reale; `agent_list` ancora stabile con più
+peer offline nello stesso scenario. Rieseguita l'intera suite preesistente
+(20+ smoke test, `check-syntax`, `check-skill-isolation`) — verde, incluso
+un aggiornamento a `scripts/smoke-test-end-project.mjs` (il suo script di
+seed usava il planner stesso per `ticket_claim`, ora strutturalmente
+vietato — corretto usando una seconda istanza fake di ruolo `coder`, esattamente
+come farebbe il flusso reale). Test manuale della CLI `po` (`npm install -g
+.`, `po init --force`, `po start --print-only`, `po end --list`) — verde.
+Versione bump a 1.2.1.
+
+## Revisione 41 — `agent_send` avvisa subito se non c'è nessuno ad ascoltare, bug reale in `agent_list` dopo un offline, conferma: nomi istanza riusabili tra progetti diversi
+
+**Due domande reali dell'operatore sullo stesso progetto `code-mem`** (uno screenshot
+di herdr: pannello del planner che mostra "delegato al coder" con un
+`assignment_id`, ma nessun coder mai lanciato per quel progetto):
+
+1. Se lo stesso nome istanza/tab (es. `planner-01`) usato in due progetti/workspace
+   diversi sia un problema.
+2. Perché il planner di `code-mem` ha dichiarato "ho delegato al coder"
+   (`agent_send` verso `target_role: "coder"`, `assignment_id` restituito) senza
+   che nessun coder fosse mai stato lanciato per quel progetto.
+
+**Domanda 1 — già risolta, verificata contro il codice e il test esistenti, nessun
+fix necessario.** `resolveDefaultProject()` (Revisione 38) deriva lo scope MQTT
+(`pi/<project>/...`) dall'identità del PROGETTO (cartella), non dal nome
+istanza — due progetti diversi ottengono prefissi di topic diversi anche
+riusando lo stesso `--instance planner-01` in entrambi. `scripts/smoke-test-project-scoping.mjs`
+(TEST 1) usa già esplicitamente `"planner-01"` come nome istanza in DUE
+directory scratch diverse (package.json `alpha-widgets`/`beta-widgets`) e
+verifica che i prefissi risolti siano diversi — esattamente lo scenario
+dell'operatore, già coperto. Anche a livello di filesystem non c'è
+collisione: il workspace `.pi/extensions/multiAgentOrchestrator/` (incluso
+`orchestrator.db`) vive dentro la cartella di CIASCUN progetto, quindi due
+progetti diversi non condividono mai lo stesso storage anche con identico
+nome istanza. Il raggruppamento per "space"/progetto visibile nel pannello
+agenti di herdr (screenshot dell'operatore: "voice-agent · planner-01" vs
+"code-mem · planner-01" come righe separate) conferma che anche herdr non
+tratta il nome istanza come chiave globale unica. Nessuna modifica al
+codice: risposta data, verificata, non un fix.
+
+**Domanda 2 — bug reale, corretto in questa revisione.** `agent_send`
+pubblica il comando sul topic MQTT del ruolo/istanza target indipendentemente
+dal fatto che qualcuno sia davvero sottoscritto — un publish non fallisce
+mai solo perché nessuno ascolta — quindi la tool call "riusciva" comunque,
+con un `assignment_id` reale, anche quando nessuna istanza di quel ruolo era
+mai stata lanciata per il progetto. L'unica rete di sicurezza esistente era
+il timeout di 30 minuti di Revisione 30 (`agent_send` risveglia il mittente
+se nessuno risponde entro `PI_ORCH_TIMEOUT_MS`) — un ritardo reale prima che
+il planner (o l'operatore, leggendo la sua chat) si accorgesse che la delega
+non sarebbe mai stata ricevuta da nessuno.
+
+**Fix** (`extensions/orchestrator.ts`, tool `agent_send`): prima di
+pubblicare, controlla la mappa di presenza (la stessa letta da `agent_list`,
+popolata da messaggi MQTT retained reali) per almeno un'istanza NON
+`"offline"` che corrisponda a `target_instance`/`target_role`. Se non ne
+trova, l'invio parte comunque (l'istanza potrebbe stare per connettersi, o
+la presenza potrebbe essere di un istante stale — questo resta un avviso,
+mai un blocco), ma il risultato del tool include `details.no_live_target:
+true` e il testo restituito include subito un `⚠️` esplicito che nomina il
+ruolo/istanza mancante — visibile nello STESSO turno della delega, non 30
+minuti dopo. `prompts/planner.md` aggiornato con una sezione dedicata: se
+vedi quell'avviso, non dichiarare la delega riuscita prima di aver
+verificato con `agent_list` o lanciato tu stesso l'istanza mancante.
+
+**Bug reale trovato ATTRAVERSO il test di questo fix, indipendente da esso**:
+`agent_list` andava in crash (`TypeError: Cannot read properties of
+undefined (reading 'join')`) non appena una qualsiasi istanza nota risultava
+mai andata offline — il payload di presenza "offline" (pubblicato sia dal
+Last Will and Testament sia dallo shutdown pulito) dichiara deliberatamente
+solo `instance`/`role`/`project`/`status`/`last_heartbeat`, mai
+`team`/`capacity`/`current_load` (un'istanza sparita non ha più nulla da
+riportare su quei campi) — ma `agent_list` assumeva che ogni `PresenceCard`
+avesse sempre la forma completa. Un bug preesistente, non introdotto da
+questa revisione, che sarebbe scattato in qualunque progetto reale dopo il
+primo agente disconnesso. Corretto con un default (`team ?? []`, `capacity
+?? 0`, `current_load ?? 0`) invece di assumere la forma piena.
+
+**Verificato**: nuovo `scripts/smoke-test-agent-send-presence-warning.mjs`,
+stessa disciplina e2e reale delle revisioni precedenti (broker Mosquitto
+reale, `extensions/orchestrator.ts` reale importato) — 9 asserzioni: nessuna
+istanza online per un `target_role` genera l'avviso e comunque un
+`assignment_id` reale; lanciare l'istanza mancante lo fa sparire; stessa
+cosa per `target_instance` con un nome esatto mai lanciato; un'istanza che
+va offline (shutdown pulito, payload "offline" reale) fa ricomparire
+l'avviso — quest'ultimo caso è anche quello che ha fatto emergere il bug di
+`agent_list` sopra. Suite completa (tutti gli smoke test esistenti +
+`e2e-full-flow.mjs` + `check-syntax`/`check-skill-isolation`) riverificata
+verde, più uno smoke test manuale completo della CLI `po` (`npm install -g
+.`, `po init`, `po start --print-only`, `po end --list`). Versione bump
+`1.1.0` → `1.2.0`.
+
+**Limite onesto**: il controllo di presenza è un avviso, non un blocco — un
+falso negativo resta possibile se la presenza è momentaneamente stale
+(l'istanza si è appena connessa ma il retained message non è ancora
+arrivato) o un falso positivo se l'istanza sta per connettersi un attimo
+dopo l'invio; in entrambi i casi il timeout di 30 minuti di Revisione 30
+resta la rete di sicurezza di ultima istanza. Non risolve né riguarda il
+motivo per cui un planner a volte salta il passaggio di lancio effettivo
+delle istanze mancanti (sezione 40/`prompts/planner.md`) — quello resta un
+problema di aderenza del prompt lato LLM, non qualcosa che il codice possa
+garantire da solo; questo fix rende solo l'errore immediatamente visibile
+invece che silenzioso.
+
+Dettagli completi (changelog riga per riga) in questo stesso file, sopra.
+
+## Revisione 40 — bug reale: run completato ma mai finalizzato/notificato (watchdog cieco a questo caso), presence idle/busy scollegata dal lavoro reale sui ticket
+
+**Incidente reale, riportato dall'operatore in produzione su `voice-agent`**:
+tre osservazioni nella stessa sessione herdr — (1) `docs-sync-02` compariva
+come "idle" nella barra di stato MQTT (in basso, widget `orchestrator-pool`)
+mentre il proprio pannello lo mostrava chiaramente al lavoro da minuti (edit,
+bash, report_append); (2) `docs-sync-02` ha effettivamente completato il suo
+task (`ticket_complete`, ticket_id `01M0JKMPRK9HKB1VJSWFYK97AW` → `done`), ma
+`planner-01` non ha mai reagito — nessun merge, nessuna notifica, il pannello
+del planner semplicemente fermo; (3) nessun WhatsApp è arrivato per questo
+blocco. L'operatore ha collegato il blocco a un riavvio del container Docker
+`llmproxy-production` fatto "nel frattempo".
+
+**Diagnosi, verificata leggendo i log/report/DB reali del progetto** (non solo
+il codice): il log jsonl di `planner-01` (`.pi/extensions/multiAgentOrchestrator/
+logs/planner-01.jsonl`) si ferma alle 17:12:46, **oltre un minuto prima** che
+`docs-sync-02` completasse il proprio ticket (17:13:52) — il planner ha smesso
+di processare qualunque cosa (nemmeno un evento di ricezione del completamento)
+proprio nella finestra del riavvio di llmproxy segnalato dall'operatore.
+Interrogando direttamente `orchestrator.db`: il run (`01M0JKKF0YYBJZWZKCDPG3AM1D`)
+risultava correttamente `status: "completed"` (il branch `allDone` di
+`ticket_complete` lo marca automaticamente quando l'ultimo ticket passa a
+`done` — funziona, verificato), tutti e 4 i ticket erano `done`, ma **nessun
+evento `worktree_finalize` né `whatsapp_notify` risultava mai registrato** —
+il merge del worktree e la notifica finale sono decisioni del planner stesso
+(chiamare `worktree_finalize`), non qualcosa che il layer ticket/DAG fa da
+solo. Il watchdog esistente (Revisione 29, `moaFindStalledTickets`) guarda
+**solo** ticket ancora in stato `"running"` — nel momento in cui l'ultimo
+ticket passa a `"done"` (e il run a `"completed"`), quel controllo non ha più
+nulla da segnalare, per costruzione: è cieco esattamente al caso "il layer
+ticket/DAG dice che è tutto finito, ma nessuno l'ha davvero chiuso verso
+l'operatore".
+
+**Due fix distinti, entrambi in `extensions/orchestrator.ts`**:
+
+1. **Watchdog: nuovo controllo `moaFindUnfinalizedRuns()`** — parallelo e
+   indipendente da `moaFindStalledTickets()`, gira nello stesso
+   `watchdogSweep()` (stesso timer, planner-only, stessa filosofia "euristica,
+   non certezza — informa, non agisce automaticamente"): un run con
+   `status === "completed"` da più di `WATCHDOG_FINALIZE_GRACE_MS` (default 10
+   min, `PI_ORCH_WATCHDOG_FINALIZE_GRACE_MS`) senza altre novità viene
+   segnalato **una sola volta** (dedupe via `watchdogRunAlerted`, stesso
+   pattern di `watchdogAlertLevel`) sia via WhatsApp sia risvegliando il
+   turno del planner (`pi.sendMessage(..., {deliverAs: "followUp", triggerTurn:
+   true})` — lo stesso meccanismo che già risveglia un planner che riceve un
+   `agent_send`). Questo è il vero "awake" richiesto dall'operatore: se il
+   turno del planner si era semplicemente fermato (non il processo intero
+   morto) perché la chiamata LLM in corso è fallita silenziosamente dopo il
+   riavvio del container, questo lo rimette in moto senza aspettare un evento
+   che potrebbe non arrivare mai da solo. Se il processo è davvero morto, il
+   WhatsApp arriva comunque (è una `fetch` indipendente dal turno del
+   planner). Esposto anche in `run_watchdog_check` (chiamabile a mano da
+   qualunque ruolo) e in `run_status`.
+
+2. **Presence MQTT (`idle`/`busy`) ora riflette anche il lavoro sui ticket, non
+   solo `agent_send`** — lo stato pubblicato su `pi/<project>/agents/<id>/status`
+   dipendeva SOLO da `inboundQueue.size` (quanti `agent_send` diretti non ancora
+   risposti), un segnale di completamento completamente diverso da
+   `ticket_claim`/`ticket_complete` (il layer ticket/DAG). Un'istanza poteva
+   quindi essere profondamente al lavoro su un ticket per minuti — molti tool
+   call, edit, bash — e risultare "idle" nel widget se non aveva (o aveva già
+   esaurito) un `agent_send` pendente, esattamente il mismatch osservato su
+   `docs-sync-02`. Fix: nuovo insieme `activeTicketIds` (per-istanza, in
+   memoria), popolato da `ticket_claim` e svuotato da `ticket_complete`;
+   `computeSelfStatus()` ora è `busy` se `inboundQueue.size > 0` OPPURE
+   `activeTicketIds.size > 0`, ripubblicato immediatamente su claim/complete
+   (non solo al prossimo heartbeat). **Limite onesto**: `activeTicketIds` è
+   stato locale al processo — se il planner completa un ticket per conto di
+   un'altra istanza (permesso esplicitamente dal tool, es. dopo uno stall), lo
+   svuotamento avviene nel set del PLANNER, non in quello dell'istanza
+   originale, che resterà "busy" finché non si riconnette da sola. Risolverlo
+   del tutto richiederebbe uno stato di ownership centralizzato (MQTT/SQLite)
+   invece che in memoria locale — fuori scope per questo incidente, che era un
+   flusso claim→complete sulla stessa istanza dall'inizio alla fine.
+
+**Verificato**: `scripts/smoke-test-watchdog.mjs` esteso con un TEST 5 (5 nuove
+assertion sul solo watchdog run-non-finalizzato: nessun falso allarme prima
+della grace period, un solo alert non ripetuto, contenuto del messaggio,
+esposizione in `run_status`/`run_watchdog_check`) più 2 assertion aggiuntive
+sulla presence reale via un client MQTT indipendente (sottoscritto al topic
+`status` reale, non stato interno) — un'istanza dedicata (`coder-02`), non
+quella lasciata deliberatamente "bloccata" dal TEST 1/3 (che infatti resta
+`busy` per sempre in quello scenario, correttamente: un worker davvero morto
+non dovrebbe mostrarsi idle). Intera suite di test pre-esistente (20 file,
+inclusi tutti gli e2e reali e il CLI `po`) rieseguita, tutta verde — nessuna
+regressione. Version bump a 1.1.0 (`package.json`).
+
+**Cosa NON risolve**: il motivo di fondo per cui il turno del planner si è
+fermato (probabilmente una richiesta HTTP al container `llmproxy-production`
+riavviato che è fallita/rimasta appesa senza essere gestita) è nel runtime di
+`pi`/nel provider LLM, non in questo pacchetto — non verificabile né
+correggibile da qui. Questo fix garantisce solo che l'operatore venga
+comunque avvisato entro un tempo limitato e che, se il turno era solo fermo
+(non il processo morto), riparta da solo.
+
 ## Revisione 39 — bug reale: la protezione anti-doppio-caricamento (Revisione 34/35) avvisava del crash imminente invece di evitarlo
 
 **Incidente reale, riportato subito dopo la consegna della Revisione 38**:

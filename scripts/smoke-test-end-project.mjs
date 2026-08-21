@@ -102,10 +102,33 @@ async function seedProject() {
 	const runA = (await call("run_create", { objective: "Run A — no tickets, stays active" })).details.run;
 	const runB = (await call("run_create", { objective: "Run B — one done, one pending ticket" })).details.run;
 	const specB = (await call("spec_create", { run_id: runB.id, title: "spec B", content: "spec body" })).details.spec;
-	const ticket1 = (await call("ticket_create", { run_id: runB.id, spec_id: specB.id, title: "ticket 1", required_capabilities: ["planner"], depends_on: [] })).details.ticket;
+	// Revisione 42: the planner may no longer ticket_claim/ticket_complete(done)
+	// its own tickets (see extensions/orchestrator.ts, ticket_claim/
+	// ticket_complete) — a second fake instance (role coder), sharing the same
+	// scratch project directory/orchestrator.db over the same real broker,
+	// does the actual claim+complete instead, exactly as a real coder would.
+	const ticket1 = (await call("ticket_create", { run_id: runB.id, spec_id: specB.id, title: "ticket 1", required_capabilities: ["coder"], depends_on: [] })).details.ticket;
 	await call("ticket_create", { run_id: runB.id, spec_id: specB.id, title: "ticket 2", required_capabilities: ["planner"], depends_on: [] });
-	await call("ticket_claim", { ticket_id: ticket1.id });
-	await call("ticket_complete", { ticket_id: ticket1.id, status: "done" });
+
+	const coderHarness = makeFakePi({ instance: "coder-01", role: "coder", broker: BROKER_URL });
+	mod.default(coderHarness.pi);
+	await coderHarness.hooks.get("session_start")({}, ctx);
+	const coderDeadline = Date.now() + 8000;
+	while (Date.now() < coderDeadline && !coderHarness.appendedEntries.some((e) => e.data?.event === "connected")) {
+		await new Promise((r) => setTimeout(r, 50));
+	}
+	if (!coderHarness.appendedEntries.some((e) => e.data?.event === "connected")) {
+		throw new Error(`seedProject: coder-01 never saw MQTT "connected" event — is mosquitto running on ${BROKER_URL}?`);
+	}
+	async function coderCall(name, params) {
+		const t = coderHarness.tools.get(name);
+		if (!t) throw new Error(`no tool registered named "${name}"`);
+		return t.execute("smoke-" + Math.random().toString(36).slice(2), params);
+	}
+	await coderCall("ticket_claim", { ticket_id: ticket1.id });
+	await coderCall("ticket_complete", { ticket_id: ticket1.id, status: "done" });
+	const coderShutdownHook = coderHarness.hooks.get("session_shutdown");
+	if (coderShutdownHook) await coderShutdownHook({}, ctx);
 
 	const shutdownHook = harness.hooks.get("session_shutdown");
 	if (shutdownHook) await shutdownHook({}, ctx);

@@ -203,7 +203,8 @@ nulla lì), questo progetto ha anche un secondo livello, persistito su
 SQLite invece che tenuto solo nella tua sessione corrente: un motore di
 run/spec/ticket con dipendenze esplicite (`orchestrator_init`,
 `run_create`, `spec_create`, `ticket_create`, `tickets_ready`,
-`ticket_claim`, `ticket_complete`, `run_status`). La distinzione di
+`ticket_claim`, `ticket_complete`, `run_status`, e il gate di approvazione
+umana `decision_hold_create`/`decision_hold_list`/`decision_hold_resolve`). La distinzione di
 responsabilità, decisa esplicitamente con l'utente, resta questa:
 **MQTT (`agent_send` e il resto) è il bus runtime — "è successo
 qualcosa" — mentre SQLite (questo layer) è la verità persistente sullo
@@ -211,6 +212,19 @@ stato del lavoro — "qual è lo stato vero del sistema"**, interrogabile
 anche dopo un riavvio delle istanze, cosa che il piano di `plan_set` da
 solo non offre (`plan_get` legge da un file dentro il worktree, non da
 uno storage strutturato con dipendenze).
+
+**Gate di approvazione umana — usa `decision_hold_*` ogni volta che una
+decisione ha bisogno di una risposta esplicita dell'operatore prima di
+procedere** (es. preflight credenziali: "fornisci ora o in parallelo?",
+passaggi distruttivi). Apri un hold con `decision_hold_create` (question +
+run_id); viene persistito su SQLite e SOPRAVVIVE ai riavvii — non è
+"il planner che se lo ricorda". Si chiude SOLO con
+`decision_hold_resolve(hold_id, decision)` (registra l'istanza che risolve
+e il testo della decisione), leggendo l'effettiva risposta dell'operatore,
+mai ciò che pensi tu che sia; un hold chiuso non si può riaprire. Gli holds
+ancora aperti compaiono in `run_status` (`open_holds`): se un run ha un
+hold open, non procedere con il lavoro che dipende dalla sua risposta finché
+l'operatore non l'ha esplicitamente risolto.
 
 **Da questa revisione, NON è più qualcosa che l'utente deve chiederti
 esplicitamente: lo fai sempre, automaticamente, per ogni task che

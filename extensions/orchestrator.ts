@@ -951,7 +951,24 @@ interface OrchestratorStorage {
 	listEvents(run_id: string, opts?: { since_id?: number; limit?: number }): EventRecord[];
 	createCheckpoint(run_id: string, label: string, payload?: unknown): void;
 	listCheckpoints(run_id: string): Array<{ id: number; run_id: string; label: string; payload: unknown; created_at: string }>;
+	createDecisionHold(input: { id?: string; run_id: string; ticket_id?: string | null; question: string; context?: unknown }): DecisionHoldRecord;
+	getDecisionHold(id: string): DecisionHoldRecord | null;
+	listDecisionHolds(run_id?: string): DecisionHoldRecord[];
+	resolveDecisionHold(id: string, resolved_by: string, decision: string): DecisionHoldRecord;
 	close(): void;
+}
+
+interface DecisionHoldRecord {
+	id: string;
+	run_id: string;
+	ticket_id: string | null;
+	question: string;
+	context: unknown;
+	status: "open" | "resolved";
+	opened_at: string;
+	resolved_at: string | null;
+	resolved_by: string | null;
+	decision: string | null;
 }
 
 const MOA_SCHEMA_SQL = `
@@ -1021,10 +1038,30 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 	created_at TEXT NOT NULL
 );
 
+-- Durable human-approval gate (firstmate 'decision-hold' pattern). A hold
+-- opens in the DB, persists across restarts by construction (it's a row), and
+-- closes ONLY when an explicit operator decision is recorded (resolved_by +
+-- decision) — never by the planner 'remembering'. Survives restarts: the
+-- reconciliation/startup path and run_status both read it from SQLite.
+CREATE TABLE IF NOT EXISTS decision_holds (
+	id TEXT PRIMARY KEY,
+	run_id TEXT NOT NULL REFERENCES runs(id),
+	ticket_id TEXT,
+	question TEXT NOT NULL,
+	context TEXT NOT NULL DEFAULT '{}',
+	status TEXT NOT NULL DEFAULT 'open',
+	opened_at TEXT NOT NULL,
+	resolved_at TEXT,
+	resolved_by TEXT,
+	decision TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_tickets_run ON tickets(run_id);
 CREATE INDEX IF NOT EXISTS idx_deps_ticket ON ticket_dependencies(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_deps_depends_on ON ticket_dependencies(depends_on_id);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
+CREATE INDEX IF NOT EXISTS idx_holds_run ON decision_holds(run_id);
+CREATE INDEX IF NOT EXISTS idx_holds_status ON decision_holds(status);
 `;
 
 class SQLiteOrchestratorStorage implements OrchestratorStorage {
@@ -1198,6 +1235,41 @@ class SQLiteOrchestratorStorage implements OrchestratorStorage {
 	listCheckpoints(run_id: string) {
 		const rows = this.db.prepare("SELECT * FROM checkpoints WHERE run_id = ? ORDER BY id ASC").all(run_id) as any[];
 		return rows.map((r) => ({ ...r, payload: JSON.parse(r.payload || "{}") }));
+	}
+
+	createDecisionHold(input: { id?: string; run_id: string; ticket_id?: string | null; question: string; context?: unknown }): DecisionHoldRecord {
+		const id = input.id ?? `hold_${crypto.randomUUID()}`;
+		const opened_at = nowIso();
+		this.db
+			.prepare(
+				"INSERT INTO decision_holds (id, run_id, ticket_id, question, context, status, opened_at) VALUES (?, ?, ?, ?, ?, 'open', ?)",
+			)
+			.run(id, input.run_id, input.ticket_id ?? null, input.question, JSON.stringify(input.context ?? {}), opened_at);
+		return this.getDecisionHold(id) as DecisionHoldRecord;
+	}
+
+	getDecisionHold(id: string): DecisionHoldRecord | null {
+		const row = this.db.prepare("SELECT * FROM decision_holds WHERE id = ?").get(id) as any;
+		if (!row) return null;
+		return { ...row, context: JSON.parse(row.context || "{}"), status: row.status, resolved_at: row.resolved_at, resolved_by: row.resolved_by, decision: row.decision };
+	}
+
+	listDecisionHolds(run_id?: string): DecisionHoldRecord[] {
+		const rows = run_id
+			? (this.db.prepare("SELECT * FROM decision_holds WHERE run_id = ? ORDER BY opened_at ASC").all(run_id) as any[])
+			: (this.db.prepare("SELECT * FROM decision_holds ORDER BY opened_at ASC").all() as any[]);
+		return rows.map((r) => ({ ...r, context: JSON.parse(r.context || "{}"), status: r.status, resolved_at: r.resolved_at, resolved_by: r.resolved_by, decision: r.decision }));
+	}
+
+	resolveDecisionHold(id: string, resolved_by: string, decision: string): DecisionHoldRecord {
+		const hold = this.getDecisionHold(id);
+		if (!hold) throw new Error(`resolveDecisionHold: no hold "${id}".`);
+		if (hold.status !== "open") throw new Error(`resolveDecisionHold: hold "${id}" already ${hold.status} — a hold closes exactly once.`);
+		const resolved_at = nowIso();
+		this.db
+			.prepare("UPDATE decision_holds SET status = 'resolved', resolved_at = ?, resolved_by = ?, decision = ? WHERE id = ?")
+			.run(resolved_at, resolved_by, decision, id);
+		return this.getDecisionHold(id) as DecisionHoldRecord;
 	}
 
 	close(): void {
@@ -3824,6 +3896,7 @@ export default function (pi: ExtensionAPI) {
 			const waves = moaComputeExecutionWaves(tickets, deps);
 			const events = storage.listEvents(params.run_id, { limit: 50 });
 			const stalled = moaFindStalledTickets(storage, identity.project, Date.now(), WATCHDOG_STALL_MS).filter((s) => s.run_id === params.run_id);
+			const openHolds = storage.listDecisionHolds(params.run_id).filter((h) => h.status === "open");
 			return {
 				content: [
 					{
@@ -3834,7 +3907,7 @@ export default function (pi: ExtensionAPI) {
 							(stalled.length ? `\n⚠️ ${stalled.length} ticket bloccato/i: ${stalled.map((s) => `${s.ticket_id} (${Math.round(s.elapsed_ms / 60_000)} min, ${s.assigned_instance ?? "?"})`).join(", ")}.` : ""),
 					},
 				],
-				details: { run, tickets, dependencies: deps, ...buckets, waves, recent_events: events, stalled_tickets: stalled },
+				details: { run, tickets, dependencies: deps, ...buckets, waves, recent_events: events, stalled_tickets: stalled, open_holds: openHolds },
 			};
 		},
 		renderCall(args, theme) {
@@ -3888,6 +3961,94 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ━━ agent_end: capture turn output and publish the response ━━━━━━━━━━
+	pi.registerTool({
+		name: "decision_hold_create",
+		label: "Decision Hold Create",
+		description:
+			"Open a durable human-approval gate (firstmate decision-hold pattern) for a decision that needs an explicit " +
+			"operator answer before dependent work may proceed — e.g. preflight credentials (will you provide them now " +
+			"or in parallel?), destructive/approval-gated steps. The hold is a SQLite row: it survives restarts (it is " +
+			"re-read by run_status, never remembered by the planner), and closes EXACTLY once via a recorded explicit " +
+			"decision (decision_hold_resolve) — never automatically. Planner-only to open.",
+		parameters: Type.Object({
+			question: Type.String({ description: "The decision or question the operator must answer." }),
+			run_id: Type.Optional(Type.String({ description: "Run this hold belongs to, if any." })),
+			ticket_id: Type.Optional(Type.String({ description: "Ticket this hold gates, if any." })),
+			context: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+		}),
+		async execute(_callId, params) {
+			if (!identity) throw new Error("orchestrator not initialised");
+			if (identity.role !== "planner") throw new Error(`decision_hold_create: only the planner role may open an approval hold (this instance is "${identity.role}").`);
+			const storage = ensureMoaStorage();
+			if (params.run_id && !storage.getRun(params.run_id)) throw new Error(`decision_hold_create: no run "${params.run_id}".`);
+			const hold = storage.createDecisionHold({ run_id: params.run_id ?? `adhoc_${identity.project}`, ticket_id: params.ticket_id, question: params.question, context: params.context });
+			if (params.run_id) {
+				storage.recordEvent(params.run_id, "decision_hold_opened", { hold_id: hold.id, question: hold.question }, params.ticket_id ?? null);
+				await moaPublishEvent(params.run_id, "decision_hold_opened", { hold_id: hold.id, question: hold.question });
+			}
+			logEvent("moa_hold_opened", { hold_id: hold.id, question: hold.question });
+			return { content: [{ type: "text" as const, text: `decision_hold_create: hold "${hold.id}" opened — ${hold.question}` }], details: { hold } };
+		},
+		renderCall(args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("decision_hold_create ")) + theme.fg("accent", (args as any)?.question ?? "?"), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const hold = (result.details as any)?.hold;
+			return new Text(theme.fg("success", "→ open ") + theme.fg("accent", hold?.id ?? "?"), 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "decision_hold_list",
+		label: "Decision Hold List",
+		description:
+			"List durable approval holds, optionally filtered by run_id. Open holds are the pending human decisions that " +
+			"gate dependent work — surfaced in run_status too. Any role may call this (read-only).",
+		parameters: Type.Object({ run_id: Type.Optional(Type.String({ description: "Limit to one run; omit for all holds." })) }),
+		async execute(_callId, params) {
+			if (!identity) throw new Error("orchestrator not initialised");
+			const storage = ensureMoaStorage();
+			const holds = storage.listDecisionHolds(params.run_id);
+			return { content: [{ type: "text" as const, text: holds.length ? `decision_hold_list: ${holds.length} hold(s).` : "decision_hold_list: nessun hold." }], details: { holds } };
+		},
+		renderCall(_args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("decision_hold_list")), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const holds = ((result.details as any)?.holds ?? []);
+			return new Text(theme.fg(holds.length ? "accent" : "success", `→ ${holds.length} hold(s)`), 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "decision_hold_resolve",
+		label: "Decision Hold Resolve",
+		description:
+			"Record an explicit operator decision that closes a durable approval hold. The hold closes exactly once, with the " +
+			"resolving instance and the decision text persisted — the gate never auto-resolves, and after this it cannot be " +
+			"resolved again. This is the ONLY way a hold stops blocking. Call it with the operator's actual answer, not what the " +
+			"planner 'remembers' the answer might be.",
+		parameters: Type.Object({ hold_id: Type.String(), decision: Type.String() }),
+		async execute(_callId, params) {
+			if (!identity) throw new Error("orchestrator not initialised");
+			const storage = ensureMoaStorage();
+			const hold = storage.getDecisionHold(params.hold_id);
+			if (!hold) throw new Error(`decision_hold_resolve: no hold "${params.hold_id}".`);
+			const updated = storage.resolveDecisionHold(params.hold_id, identity.instance, params.decision);
+			storage.recordEvent(hold.run_id, "decision_hold_resolved", { hold_id: hold.id, decision: params.decision, resolved_by: identity.instance });
+			await moaPublishEvent(hold.run_id, "decision_hold_resolved", { hold_id: hold.id, decision: params.decision });
+			logEvent("moa_hold_resolved", { hold_id: hold.id, decision: params.decision, resolved_by: identity.instance });
+			return { content: [{ type: "text" as const, text: `decision_hold_resolve: "${hold.id}" → ${updated.status} (${params.decision}, by ${identity.instance}).` }], details: { hold: updated } };
+		},
+		renderCall(args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("decision_hold_resolve ")) + theme.fg("accent", `${(args as any)?.hold_id ?? "?"} → ${(args as any)?.decision ?? "?"}`), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const hold = (result.details as any)?.hold;
+			return new Text(theme.fg("success", `→ ${hold?.status ?? "?"} by `) + theme.fg("accent", hold?.resolved_by ?? "?"), 0, 0);
+		},
+	});
+
 	pi.on("agent_end", async (_event, ctx) => {
 		if (identity) herdrReportAgent(identity.displayName, "idle", identity.instance);
 		const inbound = [...inboundQueue.values()].reverse().find((i) => !i.fulfilled);

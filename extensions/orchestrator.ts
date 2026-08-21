@@ -1949,6 +1949,15 @@ export default function (pi: ExtensionAPI) {
 		if (identity.role === "planner") {
 			watchdogTimer = setInterval(() => { void watchdogSweep(Date.now()); }, WATCHDOG_INTERVAL_MS);
 			try { (watchdogTimer as any).unref?.(); } catch { /* ignore */ }
+
+			// Reconciliation across restarts (Ticket 06): a short delay after
+			// connect so retained MQTT presence has had time to arrive, then a
+			// single deterministic pass that surfaces dangling running tickets
+			// and open holds from the previous sessions' active runs. It only
+			// RECORDS findings (checkpoint + event) for the planner's next turn
+			// to act on — the resumability contract forbids auto-requeue.
+			const reconcilTimer = setTimeout(() => { void moaReconcileStartup(); }, Number(process.env.PI_ORCH_RECONCILE_DELAY_MS) || 1500);
+			try { (reconcilTimer as any).unref?.(); } catch { /* ignore */ }
 		}
 	});
 
@@ -2092,6 +2101,67 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// best-effort
 		}
+	}
+
+	// Reconciliation across restarts (firstmate 'restart is a non-event'
+	// principle as a deterministic, idempotent pass — NOT an LLM step). On
+	// session start the planner scans THIS project's active runs and derives
+	// two facts purely from SQLite + live MQTT presence:
+	//   (1) dangling running tickets — running tickets whose assigned_instance
+	//       is no longer in the live presence set (its process died);
+	//   (2) open decision holds that still gate work.
+	// It RECORDS these as a durable `reconcile_sweep` checkpoint (+ log event)
+	// and RETURNS them. It does NOT auto-requeue/cancel anything: the
+	// resumability contract (Revisione 26) says a ticket left running by a
+	// dead process is surfaced, not silently resolved — a planner turn is what
+	// decides how to proceed (ping/reassign/fail), via the same [watchdog]
+	// wake the stall sweep already drives. Idempotency: the pass is a pure
+	// read+append; running it twice over the same DB+presence yields the same
+	// derived findings and only appends duplicate checkpoints (the planner
+	// dedupes by run/status when acting, so no side effect is applied twice).
+	// Planner-only; never throws; every side effect best-effort.
+	async function moaReconcileStartup(): Promise<
+		{ run_id: string; dangling: Array<{ ticket_id: string; assigned_instance: string | null; title: string }>; open_holds: Array<{ hold_id: string; question: string }> }[]
+	> {
+		if (!identity || identity.role !== "planner" || !moaStorage) return [];
+		// An instance is 'live' for reconciliation only if its presence card is
+		// current AND not offline (a retained 'offline' card from a graceful
+		// shutdown lingers on the broker and must NOT count as live), and it
+		// belongs to this project. This is what makes a crashed/gracefully-stopped
+		// worker's running tickets surface as dangling.
+		const liveInstances = new Set<string>([
+			identity.instance,
+			...[...presence.values()]
+				.filter((c) => c.status !== "offline" && c.project === identity.project)
+				.map((c) => c.instance),
+		]);
+		const findings: {
+			run_id: string;
+			dangling: Array<{ ticket_id: string; assigned_instance: string | null; title: string }>;
+			open_holds: Array<{ hold_id: string; question: string }>;
+		}[] = [];
+		try {
+			const activeRuns = moaStorage.listRuns(identity.project).filter((r) => r.status === "active");
+			for (const run of activeRuns) {
+				const tickets = moaStorage.listTickets(run.id);
+				const dangling = tickets
+					.filter((t) => t.status === "running" && t.assigned_instance && !liveInstances.has(t.assigned_instance))
+					.map((t) => ({ ticket_id: t.id, assigned_instance: t.assigned_instance, title: t.title }));
+				const openHolds = moaStorage
+					.listDecisionHolds(run.id)
+					.filter((h) => h.status === "open")
+					.map((h) => ({ hold_id: h.id, question: h.question }));
+				if (dangling.length || openHolds.length) {
+					findings.push({ run_id: run.id, dangling, open_holds: openHolds });
+					moaStorage.createCheckpoint(run.id, "reconcile_sweep", { findings: { dangling, open_holds: openHolds }, at: nowIso() });
+					moaStorage.recordEvent(run.id, "reconcile_sweep", { dangling, open_holds: openHolds });
+					logEvent("moa_reconcile_sweep", { run_id: run.id, dangling: dangling.length, open_holds: openHolds.length });
+				}
+			}
+		} catch {
+			// best-effort — a reconciliation failure must never prevent startup
+		}
+		return findings;
 	}
 
 	// Planner-only (a coder/specialist instance can't act on a stalled ticket
@@ -3897,6 +3967,7 @@ export default function (pi: ExtensionAPI) {
 			const events = storage.listEvents(params.run_id, { limit: 50 });
 			const stalled = moaFindStalledTickets(storage, identity.project, Date.now(), WATCHDOG_STALL_MS).filter((s) => s.run_id === params.run_id);
 			const openHolds = storage.listDecisionHolds(params.run_id).filter((h) => h.status === "open");
+			const checkpoints = storage.listCheckpoints(params.run_id);
 			return {
 				content: [
 					{
@@ -3907,7 +3978,7 @@ export default function (pi: ExtensionAPI) {
 							(stalled.length ? `\n⚠️ ${stalled.length} ticket bloccato/i: ${stalled.map((s) => `${s.ticket_id} (${Math.round(s.elapsed_ms / 60_000)} min, ${s.assigned_instance ?? "?"})`).join(", ")}.` : ""),
 					},
 				],
-				details: { run, tickets, dependencies: deps, ...buckets, waves, recent_events: events, stalled_tickets: stalled, open_holds: openHolds },
+				details: { run, tickets, dependencies: deps, ...buckets, waves, recent_events: events, stalled_tickets: stalled, open_holds: openHolds, checkpoints },
 			};
 		},
 		renderCall(args, theme) {

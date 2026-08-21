@@ -4236,6 +4236,22 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// Semantic per-harness liveness signal (Ticket 05). Pi exposes turn-level
+	// tool-execution lifecycle events; logging the START of each tool call gives
+	// a high-frequency, low-noise "the model is actively tooling" marker. A stall
+	// watcher (scripts/watch-stalls.mjs) or the planner's own sweep can read it
+	// from the instance JSONL log to classify a running ticket as "slow" (recent
+	// tools) vs "blocked" (a hung turn — the Revisione 29 incident) without any
+	// LLM turn. appendEntry is state-persistence only, never sent to the LLM.
+	pi.on("tool_execution_start", (_event, _ctx) => {
+		if (!identity) return;
+		try {
+			const tool = ((_event as any)?.toolName ?? "?") as string;
+			pi.appendEntry("orchestrator-log", { event: "tool_execution_start", instance: identity.instance, tool });
+			logEvent("tool_execution_start", { tool });
+		} catch { /* best-effort */ }
+	});
+
 	pi.on("agent_end", async (_event, ctx) => {
 		if (identity) herdrReportAgent(identity.displayName, "idle", identity.instance);
 		const inbound = [...inboundQueue.values()].reverse().find((i) => !i.fulfilled);

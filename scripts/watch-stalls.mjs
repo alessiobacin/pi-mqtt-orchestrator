@@ -34,7 +34,7 @@
 // viene assorbita allo stesso modo, così il watcher può essere lanciato una
 // volta e rimanere silenzioso mentre l'operatore è lontano.
 
-import { existsSync, mkdirSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, readdirSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -113,10 +113,41 @@ export async function runWatch({ cwd, argv }) {
 	}
 
 	const logDir = path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", "logs");
+
+	// Semantic liveness proxy (Ticket 05): an assignee whose JSONL log carries a
+	// recent tool_execution_start marker (logged by the extension at the START of
+	// each tool call) is *actively tooling* — likely a long task, not a hung turn.
+	// This is the per-harness semantic signal that lets an observer distinguish
+	// "slow" from "blocked" (the Revisione 29 case) without any LLM turn.
+	const semanticActive = new Set();
+	try {
+		if (existsSync(logDir)) {
+			const stalenessWindow = Math.min(opts.stallMs, 600_000); // tool call within the last (stall or 10min) window counts as active
+			const cutoff = now - stalenessWindow;
+			for (const f of readdirSync(logDir)) {
+				if (!f.endsWith(".jsonl")) continue;
+				const inst = f.replace(/\.jsonl$/, "");
+				try {
+					const lines = readFileSync(path.join(logDir, f), "utf-8").split("\n").filter(Boolean);
+					for (let i = lines.length - 1; i >= 0; i--) {
+						const line = lines[i].trim();
+						if (!line) continue;
+						const o = JSON.parse(line);
+						if (o && o.type === "tool_execution_start") {
+							const t = new Date(o.ts).getTime();
+							if (!Number.isNaN(t) && t > cutoff) semanticActive.add(inst);
+							break;
+						}
+					}
+				} catch { /* log format drift — ignore */ }
+			}
+		}
+	} catch { /* best-effort */ }
 	const marker = [];
 	for (const t of stalled) {
 		const elapsedMs = now - new Date(t.updated_at).getTime();
-		const event = { ts: new Date().toISOString(), type: "stall_watch", ticket_id: t.id, run_id: t.run_id, assigned_instance: t.assigned_instance, elapsed_ms: elapsedMs };
+		const active = t.assigned_instance ? semanticActive.has(t.assigned_instance) : false;
+		const event = { ts: new Date().toISOString(), type: "stall_watch", ticket_id: t.id, run_id: t.run_id, assigned_instance: t.assigned_instance, elapsed_ms: elapsedMs, semantic_active: active };
 		if (client) {
 			const topic = `pi/${project}/runs/${t.run_id}/events`;
 			try {
@@ -127,7 +158,7 @@ export async function runWatch({ cwd, argv }) {
 			mkdirSync(logDir, { recursive: true });
 			appendFileSync(path.join(logDir, "watch-stalls.jsonl"), JSON.stringify(event) + "\n");
 		} catch { /* best-effort */ }
-		console.log(`⚠️  ${t.id} "${t.title || "(no title)"}" — running da ${Math.round(elapsedMs / 60_000)} min (${t.assigned_instance ?? "?"})`);
+		console.log(`⚠️  ${t.id} "${t.title || "(no title)"}" — running da ${Math.round(elapsedMs / 60_000)} min (${t.assigned_instance ?? "?"})${active ? " [tool attivi di recente → probabile task lento, non bloccato]" : " [NESSUN tool recente → possibile turno bloccato]"}`);
 		marker.push(event);
 	}
 

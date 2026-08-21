@@ -132,6 +132,13 @@ async function main() {
 	await coder.call("ticket_claim", { ticket_id: stalled.id });
 	await coder.call("ticket_claim", { ticket_id: fresh.id });
 
+	// Ticket 05 — the extension's tool_execution_start hook appends a semantic
+	// marker to the instance's JSONL log (the per-harness liveness signal). Drive
+	// the hook directly via the harness (the way pi would when a tool starts).
+	const toolStartHook = coder.harness.hooks.get("tool_execution_start");
+	if (toolStartHook) await toolStartHook({ type: "tool_execution_start", toolCallId: "x", toolName: "bash", args: {} }, coder.ctx);
+	ok(true, "tool_execution_start hook is registered and can be driven by the harness");
+
 	// Backdate the first ticket's updated_at so it is past the stall threshold.
 	const dbPath = path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", "orchestratorStorage", "orchestrator.db");
 	await backdateTicket(dbPath, stalled.id, 1_200_000); // 20 min ago (> 15 min default stall)
@@ -160,6 +167,22 @@ async function main() {
 	const markers = fs.readFileSync(markerPath, "utf-8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 	ok(markers.some((m) => m.type === "stall_watch" && m.ticket_id === stalled.id), "marker recorded the stalled ticket");
 	ok(!markers.some((m) => m.ticket_id === fresh.id), "no marker for the fresh ticket");
+
+	console.log("\n=== PART 2b — semantic liveness flips the marker classification (Ticket 05) ===");
+	// Seed a recent tool_execution_start marker for coder-01 and re-run: the
+	// newly appended stall marker must carry semantic_active:true (slow, not
+	// blocked).
+	try { fs.rmSync(markerPath, { force: true }); } catch { /* ignore */ }
+	try {
+		const coderLog = path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", "logs", "coder-01.jsonl");
+		fs.mkdirSync(path.dirname(coderLog), { recursive: true });
+		fs.appendFileSync(coderLog, JSON.stringify({ ts: new Date().toISOString(), type: "tool_execution_start", tool: "read" }) + "\n");
+	} catch { /* ignore (redundant: coder claimed earlier so log exists) */ }
+	await runWatch({ cwd, argv: ["--once", "--project", "watch-smoke"] });
+	const semMarkers = fs.readFileSync(markerPath, "utf-8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+	const semStalled = semMarkers.filter((m) => m.ticket_id === stalled.id);
+	ok(semStalled.length >= 1, "watcher re-ran after the tool signal and re-appended a marker for the stalled ticket");
+	ok(semStalled.some((m) => m.semantic_active === true), "with a recent tool_execution_start the stalled ticket is marked semantic_active (slow, not blocked)");
 
 	console.log("\n=== PART 3 — away-mode suppresses routine, escalates real decisions (Ticket 07) ===");
 // Green DB path: backdate BOTH tickets? No — create a clean run with NO stalled

@@ -3711,3 +3711,13 @@ machine-readable (`ok`/`results`/`missing`) che il planner passa come context
 a `decision_hold_create` (ticket 02) per chiedere wait-vs-async all'operatore
 prima di lanciare il team. Prompt planner aggiornato col flusso di preflight.
 Test: `scripts/smoke-test-po-deps.mjs`.
+
+#### Ticket 05 — segnali semantici per-harness
+
+L'estensione ora aggancia `tool_execution_start` di Pi e scrive un marcatore nel
+log JSONL dell'istanza (appendEntry = non va mai al LLM). Lo stall watcher
+(`po watch`) legge quei marcatori: un task `running` il cui assegnatario ha un
+`tool_execution_start` recente viene classificato come "probabile lento, non
+bloccato", altrimenti "possibile turno bloccato" (il caso Revisione 29) — senza
+consumare alcun token LLM. Test: `scripts/smoke-test-watch-stalls.mjs`
+(13 assert, ora include semantic liveness + away-mode).

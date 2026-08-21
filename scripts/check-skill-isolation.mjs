@@ -104,6 +104,7 @@ const allowedFiles = new Set(
 		"scripts/check-skill-isolation.mjs",
 		"README.md",
 		"docs/mvp-notes.md",
+		"docs/development-notes.md",
 		"AGENTS.md",
 		"docs/agents/issue-tracker.md",
 		"docs/agents/domain.md",

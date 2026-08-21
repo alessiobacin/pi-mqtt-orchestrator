@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // `po` — CLI unificata di pi-mqtt-orchestrator (Revisione 31, vedi
-// docs/mvp-notes.md). Sostituisce il vecchio binario a sé
-// `pi-orchestrator-init` con cinque sottocomandi:
+// docs/development-notes.md). Sostituisce il vecchio binario a sé
+// `pi-orchestrator-init` con sei sottocomandi:
 //
 //   po init [opzioni]    scaffolda l'estensione nella directory CORRENTE
 //                        (default — vedi `po init --help`), delega a
@@ -20,6 +20,9 @@
 //                        scripts/update.mjs (runUpdate()).
 //   po uninstall [--yes] rimuove l'installazione globale (Revisione 34) —
 //                        delega a scripts/uninstall.mjs (runUninstall()).
+//   po end [opzioni]     chiude i run "active" del layer ticket/DAG per il
+//                        progetto nella directory corrente (Revisione 38) —
+//                        delega a scripts/end-project.mjs (runEndProject()).
 //
 // Installazione: `npm install -g <repo>` (o `npm link` in locale, per lo
 // sviluppo di questo pacchetto stesso) espone `po` sul PATH — campo "bin" di
@@ -40,6 +43,7 @@ import { runLaunchPlanner } from "../scripts/launch-planner.mjs";
 import { runDoctor } from "../scripts/doctor.mjs";
 import { runUpdate } from "../scripts/update.mjs";
 import { runUninstall } from "../scripts/uninstall.mjs";
+import { runEndProject } from "../scripts/end-project.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -56,6 +60,7 @@ function printTopUsage() {
 			"  doctor           Verifica che l'ambiente abbia git/pi/un broker MQTT disponibili",
 			"  update [--check] Aggiorna l'installazione globale all'ultima versione della repo GitHub",
 			"  uninstall [--yes] Rimuove l'installazione globale",
+			'  end [opzioni]    Chiude i run "active" del progetto nella directory corrente — `po end --help`',
 			"",
 			"  --version, -v    Stampa la versione del pacchetto installato",
 			"  --help, -h       Mostra questo messaggio",
@@ -97,6 +102,10 @@ async function main() {
 	}
 	if (sub === "uninstall") {
 		await runUninstall({ packageRoot, argv: rest });
+		return;
+	}
+	if (sub === "end") {
+		await runEndProject({ cwd, argv: rest });
 		return;
 	}
 

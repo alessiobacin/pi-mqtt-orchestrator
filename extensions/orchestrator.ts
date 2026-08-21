@@ -26,7 +26,7 @@
  *                                        addressed directly (pub/sub, not
  *                                        just request/response)
  *
- * Explicitly NOT implemented here (see docs/mvp-notes.md): the Scheduler
+ * Explicitly NOT implemented here (see docs/development-notes.md): the Scheduler
  * Engine, DAG/playbook execution, the scored Agent Router, review-loop
  * composite nodes, budget enforcement, TLS/ACL hardening. This file is only
  * the transport + identity + presence + pub/sub layer described in
@@ -103,7 +103,7 @@ type CommandEnvelope = {
 	sender_role: string;
 	target_instance?: string; // 1:1 addressing
 	target_role?: string;     // fan-out to every live instance of a role (no
-	                          // claim arbitration in this MVP — see docs/mvp-notes.md)
+	                          // claim arbitration at this stage — see docs/development-notes.md)
 	project: string;
 	prompt: string;
 	reply_to: string; // topic the response must be published to
@@ -208,7 +208,7 @@ function loadYamlIfExists(file: string): any {
 		if (!fs.existsSync(file)) return null;
 		return parseYaml(fs.readFileSync(file, "utf-8"));
 	} catch {
-		return null; // best-effort — MVP: a malformed config falls back to CLI flags
+		return null; // best-effort — a malformed config falls back to CLI flags
 	}
 }
 
@@ -314,6 +314,74 @@ function isValidHex(hex: string): boolean {
 function fallbackColor(seed: string): string {
 	const h = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 8);
 	return FALLBACK_PALETTE[Number(BigInt("0x" + h)) % FALLBACK_PALETTE.length];
+}
+
+// Kept as a local copy rather than importing scripts/create-project.mjs's
+// slugify() — this file is a standalone extension (loaded via `pi -e
+// extensions/orchestrator.ts` or globally after `pi extension install`),
+// never guaranteed to sit next to scripts/ when installed, so it can't take
+// on a cross-file dependency. Same normalize/strip-diacritics/kebab-case
+// behavior as create-project.mjs's slugify() by design — see
+// resolveDefaultProject() below for why they need to agree.
+function slugify(s: string): string {
+	return (
+		s
+			.toLowerCase()
+			.normalize("NFKD")
+			.replace(/[̀-ͯ]/g, "")
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 60) || "progetto"
+	);
+}
+
+// Revisione 38 (see docs/development-notes.md) — a real incident: the
+// operator scaffolded a second project and, without ever passing
+// `--project`, its planner immediately saw the FIRST project's agents on
+// the same local broker. Root cause: `--project` (registerFlag below)
+// used to default to the literal string "default" for every single
+// scaffolded project, so any two projects sharing one MQTT broker — which
+// the Quickstart explicitly makes easy, one `docker compose ... up -d` per
+// machine, not per project — land on the exact same `pi/default/...` topic
+// tree and cross-talk. Fix: when `--project` isn't passed explicitly,
+// derive a project-specific default instead of a shared constant, cheapest
+// signal first:
+//   1. config/project.json's own `project` field, if the workspace has
+//      already been initialized (orchestrator_init ran, or `po init` itself
+//      pre-wrote it — see create-project.mjs) — this is the operator's own
+//      chosen name (via --name, or a later project_name rename), slugified
+//      for topic-safety since it may contain spaces ("URL Shortener").
+//   2. package.json's `name` field — every project scaffolded by `po init`
+//      already gets one, kebab-case, from the same --name (create-project.mjs's
+//      own slugify()); reading it here needs no workspace to exist yet, so
+//      it also covers the very first launch before orchestrator_init runs.
+//   3. slugify(basename(cwd)) — last resort for a project with neither
+//      (e.g. hand-rolled, pre-`po init` setup): still distinct per directory,
+//      which is all that actually matters here.
+//   4. "default" — only if cwd itself has no usable name (empty basename).
+// `--project` still always wins when passed explicitly — this only changes
+// what happens when it's omitted, which was silently unsafe before.
+function resolveDefaultProject(cwd: string): string {
+	try {
+		const cfgPath = path.join(cwd, ".pi", "extensions", "multiAgentOrchestrator", "config", "project.json");
+		if (fs.existsSync(cfgPath)) {
+			const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+			if (typeof cfg.project === "string" && cfg.project.trim()) return slugify(cfg.project);
+		}
+	} catch {
+		// malformed/unreadable config.json — fall through to the next signal
+	}
+	try {
+		const pkgPath = path.join(cwd, "package.json");
+		if (fs.existsSync(pkgPath)) {
+			const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+			if (typeof pkg.name === "string" && pkg.name.trim()) return slugify(pkg.name);
+		}
+	} catch {
+		// malformed/unreadable package.json — fall through to the next signal
+	}
+	const base = path.basename(cwd);
+	return base ? slugify(base) : "default";
 }
 
 interface CliFlags {
@@ -467,7 +535,7 @@ function herdrReportAgent(label: string, state: "idle" | "working" | "blocked" |
 // explicit, user-confirmed fallback (from herdr's own CLI help on their
 // machine) for when herdrReportAgent()'s state-reporting protocol above
 // doesn't change what's shown there (e.g. because that list is a saved
-// launch-profile name, not live per-turn state — see docs/mvp-notes.md
+// launch-profile name, not live per-turn state — see docs/development-notes.md
 // Revisione 7/10). herdr exposes this as `herdr agent rename <pane_id>
 // <name>` in some versions and `herdr pane rename <pane_id> <name>` in
 // others; since I can't confirm which one exists on any given install from
@@ -499,7 +567,7 @@ function herdrRenamePane(name: string): void {
 }
 
 // paseo (https://paseo.sh) — client-daemon tool for managing agent
-// sessions. NOTE (Revisione 23, see docs/mvp-notes.md): confirmed in a
+// sessions. NOTE (Revisione 23, see docs/development-notes.md): confirmed in a
 // real user test that `paseo run --provider <x> -- <text>` treats
 // everything after `--provider` as a natural-language PROMPT for the
 // agent, not literal argv to exec — there's no documented exec/shell
@@ -584,14 +652,13 @@ function worktreePaths(projectCwd: string, slug: string): { path: string; branch
 // (e.g. no git user.email/name configured yet) — the worktree creation that
 // follows still proceeds either way.
 async function ensureWorktreesGitignored(projectCwd: string): Promise<void> {
-	// Covers both .worktrees/ (task worktrees) and logs/ (per-instance debug
-	// event logs, Revisione 18) in the same pass/commit — logs/ is purely
-	// diagnostic output, never part of any task's deliverable, so it belongs
-	// out of `git status` in the main checkout for the same reason
-	// .worktrees/ does.
+	// Covers .worktrees/ (task worktrees) — logs/ used to need the same
+	// treatment (Revisione 18) until Revisione 37 moved it under
+	// .pi/extensions/multiAgentOrchestrator/, which every scaffolded project
+	// has gitignored wholesale since Revisione 31, so it no longer needs its
+	// own entry here.
 	const patterns: Array<{ dir: string; comment: string }> = [
-		{ dir: ".worktrees/", comment: "# pi-mqtt-orchestrator: per-task git worktrees (see docs/mvp-notes.md)" },
-		{ dir: "logs/", comment: "# pi-mqtt-orchestrator: per-instance debug event logs, diagnostic only (see docs/mvp-notes.md, Revisione 18)" },
+		{ dir: ".worktrees/", comment: "# pi-mqtt-orchestrator: per-task git worktrees (see docs/development-notes.md)" },
 	];
 	const gitignorePath = path.join(projectCwd, ".gitignore");
 	let existing = "";
@@ -618,7 +685,7 @@ async function ensureWorktreesGitignored(projectCwd: string): Promise<void> {
 
 	try {
 		await execGit(["add", ".gitignore"], projectCwd);
-		await execGit(["commit", "-m", "chore: gitignore .worktrees/ and logs/ (pi-mqtt-orchestrator)"], projectCwd);
+		await execGit(["commit", "-m", "chore: gitignore .worktrees/ (pi-mqtt-orchestrator)"], projectCwd);
 	} catch {
 		// Non-fatal — worst case .gitignore sits there modified/untracked
 		// until the next manual or agent-driven commit picks it up.
@@ -636,8 +703,8 @@ async function assertGitRepo(cwd: string): Promise<void> {
 // `git worktree list` reports each worktree's REAL (symlink-resolved) path.
 // Comparing that against our own plain path.join() computation would false-
 // negative on macOS, where /tmp (and other common parent dirs) is itself a
-// symlink to /private/tmp — the exact platform this MVP has been tested on
-// in this conversation. realpath both sides before comparing; fall back to
+// symlink to /private/tmp — the exact platform this project has been tested
+// on in this conversation. realpath both sides before comparing; fall back to
 // path.resolve() when a path doesn't exist yet (nothing to resolve to).
 function normalizePath(p: string): string {
 	try {
@@ -661,7 +728,7 @@ async function findExistingWorktree(projectCwd: string, wtPath: string): Promise
 //
 // First vertical slice of the ticket/DAG/SQLite orchestration layer agreed
 // with the operator on top of the existing MQTT+worktree+roster+phase-gate
-// MVP (see docs/mvp-notes.md). Deliberate split, as specified by the
+// system (see docs/development-notes.md). Deliberate split, as specified by the
 // operator:
 //
 //   MQTT   -> "something happened" — fast pub/sub signals (ticket_ready,
@@ -683,7 +750,7 @@ async function findExistingWorktree(projectCwd: string, wtPath: string): Promise
 // full crash/timeout retry with fencing tokens (a ticket left "running"
 // when its process dies is surfaced as such by run_status/tickets_ready,
 // not automatically requeued yet), budget enforcement, the architecture
-// map/index generator, and vendoring To-Tickets. See docs/mvp-notes.md,
+// map/index generator, and vendoring To-Tickets. See docs/development-notes.md,
 // Revisione 26, for the full list and rationale.
 //
 // Honest limit: node:sqlite (DatabaseSync) is used directly, verified only
@@ -705,11 +772,27 @@ function moaWorkspaceDir(projectCwd: string): string {
 // written to by any tool — dead scaffold). This workspace's own event
 // trail already lives in SQLite (the `events` table, written by
 // recordEvent()), so a second, parallel logs/*.jsonl location here would
-// only duplicate it. The ROOT-level logs/<instance>.jsonl (Revisione 18,
-// written by logEvent() below, read by scripts/review-log.mjs) is a
-// DIFFERENT, still-active mechanism — a raw per-instance debug trace used
-// to audit whether the LLM agents' own report matches what actually
-// happened — and is NOT affected by this removal.
+// only duplicate it.
+//
+// Revisione 37: "reports", "prompts", and "logs" ADDED back — this time on
+// purpose, at the operator's explicit request. Root-level reports/<slug>.md
+// and prompts/<role>.md, and the ROOT-level logs/<instance>.jsonl (Revisione
+// 18) all used to live directly under the project root, tracked by git like
+// any other source file. The operator's point: these are process artifacts
+// of THIS project's development with `pi-mqtt-orchestrator` — the planner's
+// task reports, the role prompts, the raw debug trace — not the project's
+// own deliverable. If the scaffolded project is later pushed to a public
+// GitHub repo, they'd sit right next to the real application code, fully
+// public, revealing internal AI-orchestration process and possibly
+// hand-tuned prompts that are effectively personal working notes. Moving
+// all three under `.pi/extensions/multiAgentOrchestrator/`, which has been
+// gitignored by every scaffolded project since Revisione 31, makes "not
+// tracked, not pushed, stays only on the machine where the project was
+// developed" the default with zero extra configuration. See
+// docs/development-notes.md, Revisione 37, for the full rationale
+// (including why prompts/ is NOT meant to be edited per-project in the
+// first place — role prompts are customized in the extension itself, once,
+// for every project, not forked per scaffold).
 function moaSubdirs(workspaceDir: string) {
 	return {
 		config: path.join(workspaceDir, "config"),
@@ -721,6 +804,9 @@ function moaSubdirs(workspaceDir: string) {
 		artifacts: path.join(workspaceDir, "artifacts"),
 		overrides: path.join(workspaceDir, "overrides"),
 		orchestratorStorage: path.join(workspaceDir, "orchestratorStorage"),
+		reports: path.join(workspaceDir, "reports"),
+		prompts: path.join(workspaceDir, "prompts"),
+		logs: path.join(workspaceDir, "logs"),
 	};
 }
 
@@ -1244,9 +1330,13 @@ export default function (pi: ExtensionAPI) {
 		default: undefined,
 	});
 	pi.registerFlag("project", {
-		description: "Project namespace — scopes the MQTT topic tree pi/<project>/...",
+		description:
+			"Project namespace — scopes the MQTT topic tree pi/<project>/... . Defaults to this project's own " +
+			"identity (config/project.json, then package.json's name, then the directory name) so two different " +
+			"projects never collide on a shared broker without you having to pass this on every launch — only " +
+			"set it explicitly if you deliberately want two directories to share one topic tree.",
 		type: "string",
-		default: "default",
+		default: undefined,
 	});
 	pi.registerFlag("broker", {
 		description: "MQTT broker URL, e.g. mqtt://localhost:1883 or mqtts://host:8883",
@@ -1304,11 +1394,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ━━ Debug event log (Revisione 18) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-	// Plain JSONL, un file per istanza (logs/<instance>.jsonl nella root del
-	// progetto — non dentro un worktree, così sopravvive a worktree_finalize/
-	// cleanup e non finisce mai in un branch). Un solo scrittore per file
-	// (ogni istanza scrive solo il proprio), quindi — a differenza del file
-	// di report condiviso — non c'è nessun rischio di lost-update qui e non
+	// Plain JSONL, un file per istanza (<instance>.jsonl dentro
+	// .pi/extensions/multiAgentOrchestrator/logs/ — non dentro un worktree,
+	// così sopravvive a worktree_finalize/cleanup e non finisce mai in un
+	// branch; spostato qui dalla root del progetto in Revisione 37, vedi
+	// moaSubdirs più sopra per il perché). Un solo scrittore per file (ogni
+	// istanza scrive solo il proprio), quindi — a differenza del file di
+	// report condiviso — non c'è nessun rischio di lost-update qui e non
 	// serve nulla di più sofisticato di fs.appendFileSync. Puramente
 	// diagnostico: nessun agente lo legge mai, non influenza in nessun modo
 	// il comportamento, best-effort (un fallimento di log non deve MAI
@@ -1316,7 +1408,7 @@ export default function (pi: ExtensionAPI) {
 	// riassemblare questi file in un'unica timeline cronologica dopo un test
 	// live, e capire se il flusso è partito nell'ordine giusto.
 	function logsDir(cwd: string): string {
-		return path.join(cwd, "logs");
+		return moaSubdirs(moaWorkspaceDir(cwd)).logs;
 	}
 
 	// Contatore monotono per-processo (Revisione 20): due eventi di istanze
@@ -1550,7 +1642,7 @@ export default function (pi: ExtensionAPI) {
 			const obj = JSON.parse(payload.toString("utf-8"));
 			if (obj && obj.type === "command") {
 				// Role-broadcast task: delivered to every live instance of that role.
-				// No claim/first-wins arbitration in this MVP — see docs/mvp-notes.md.
+				// No claim/first-wins arbitration at this stage — see docs/development-notes.md.
 				if (identity && obj.target_role === identity.role && obj.sender_instance !== identity.instance) {
 					handleCommand(obj as CommandEnvelope);
 				}
@@ -1607,7 +1699,7 @@ export default function (pi: ExtensionAPI) {
 		const cfg = loadConfig(cwd, flags.configDir || "agents");
 		const resolved = resolveCapabilities(flags.instance, cfg);
 		const role = flags.role || resolved.role;
-		const project = flags.project || "default";
+		const project = flags.project || resolveDefaultProject(cwd);
 		const color = flags.color && isValidHex(flags.color) ? flags.color : fallbackColor(flags.instance);
 		const displayName = flags.name || flags.instance;
 
@@ -1799,7 +1891,14 @@ export default function (pi: ExtensionAPI) {
 		const flags = readCliFlags(pi);
 		const cfg = loadConfig(identity.cwd, flags.configDir || "agents");
 		const roleCfg = cfg.roles[identity.role];
-		const template = loadRolePrompt(identity.cwd, flags.promptsDir || "prompts", identity.role, roleCfg);
+		// Default spostato in Revisione 37 da "prompts" (root del progetto,
+		// tracciato da git) a .pi/extensions/multiAgentOrchestrator/prompts
+		// (gitignored) — vedi moaSubdirs più sopra per il perché. --prompts-dir
+		// resta un override esplicito e completo: chi lo passa si aspetta
+		// esattamente quel percorso (relativo a cwd, o assoluto), non una
+		// sotto-cartella di .pi/.
+		const defaultPromptsDir = path.join(".pi", "extensions", "multiAgentOrchestrator", "prompts");
+		const template = loadRolePrompt(identity.cwd, flags.promptsDir || defaultPromptsDir, identity.role, roleCfg);
 		const systemPrompt = template
 			.replaceAll("{{INSTANCE}}", identity.instance)
 			.replaceAll("{{ROLE}}", identity.role)
@@ -2014,7 +2113,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Agent Send",
 		description:
 			"Send a task command to a peer agent, addressed either by exact instance id (target_instance, 1:1) or by role " +
-			"(target_role, fans out to every live instance of that role — no claim arbitration in this MVP, all of them will receive it). " +
+			"(target_role, fans out to every live instance of that role — no claim arbitration at this stage, all of them will receive it). " +
 			"Returns immediately with an assignment_id. Use agent_get (non-blocking) or agent_await (blocking) to retrieve the reply.\n\n" +
 			"Every send inherits a hop count from whatever inbound task you're currently replying to, and is dropped once it exceeds " +
 			`${MAX_HOPS} hops — a safety net against runaway auto-forwarding loops within ONE delegation chain. If you are deliberately ` +
@@ -2376,7 +2475,7 @@ export default function (pi: ExtensionAPI) {
 	// validation) split across THREE separate worktrees/branches, created by
 	// three separate planner sessions that each had no way to know an earlier
 	// one had already opened (and never finalized) a worktree for what was
-	// arguably the same task — see docs/mvp-notes.md, Revisione 24, and
+	// arguably the same task — see docs/development-notes.md, Revisione 24, and
 	// claude/e2e-codice-fiscale-analysis.md for the full transcript. Nothing
 	// in this codebase persists cross-session task memory (each planner
 	// session starts cold), so the fix is a cheap, always-available lookup:
@@ -2392,7 +2491,7 @@ export default function (pi: ExtensionAPI) {
 			"new request MIGHT be a continuation of, or overlap with, something already in flight — especially across separate " +
 			"planner sessions, which have no memory of each other's unfinished worktrees otherwise (this is exactly how one " +
 			"feature ended up split across 3 separate worktrees/branches in a real incident — Revisione 24, see " +
-			"docs/mvp-notes.md). If anything here looks like the same feature as the new request, ask the user explicitly " +
+			"docs/development-notes.md). If anything here looks like the same feature as the new request, ask the user explicitly " +
 			"whether to continue in that existing worktree (reuse its slug) instead of creating a new one — don't guess either way.",
 		parameters: Type.Object({}),
 		async execute(_callId, _params) {
@@ -2478,7 +2577,7 @@ export default function (pi: ExtensionAPI) {
 	// WhatsApp connection to send FROM), never to a pi agent instance.
 	//
 	// Expected .env keys (see .env.example — exact names not yet confirmed
-	// against the user's real .env, see docs/mvp-notes.md Revisione 19):
+	// against the user's real .env, see docs/development-notes.md Revisione 19):
 	//   EVOLUTION_API_URL         base URL of the Evolution API server
 	//   EVOLUTION_API_KEY         sent as the `apikey` header
 	//   EVOLUTION_INSTANCE_NAME   which WhatsApp connection to send FROM
@@ -2748,7 +2847,7 @@ export default function (pi: ExtensionAPI) {
 	// `git checkout <branch> -- <files>`, entirely bypassing worktree_finalize
 	// — which meant nothing ever ran `git worktree remove` or `git branch -D`,
 	// leaving an orphaned worktree/branch sitting around indefinitely (see
-	// docs/mvp-notes.md, Revisione 24). This tool is the cleanup step for
+	// docs/development-notes.md, Revisione 24). This tool is the cleanup step for
 	// exactly that path: once a human (or the planner, told by a human) has
 	// confirmed the work already landed in main some other way, this closes
 	// the loop — preserves the report, removes the worktree, optionally
@@ -2765,7 +2864,7 @@ export default function (pi: ExtensionAPI) {
 			"reports/<slug>.md first if it isn't already there, so the record of what happened isn't lost) and removes the " +
 			"worktree (and, by default, the branch). Refuses outright if the worktree still has UNCOMMITTED changes, to avoid " +
 			"silently discarding work — commit or discard them first, or use worktree_finalize instead if this should actually " +
-			"be merged normally. Exists because of a real incident (Revisione 24, see docs/mvp-notes.md) where a manual merge- " +
+			"be merged normally. Exists because of a real incident (Revisione 24, see docs/development-notes.md) where a manual merge- " +
 			"conflict resolution bypassed worktree_finalize entirely and left an orphaned worktree with nothing to ever clean " +
 			"it up.",
 		parameters: Type.Object({
@@ -2864,8 +2963,23 @@ export default function (pi: ExtensionAPI) {
 	// an agent that ignores it, the same limit any file lock has in a system
 	// without a kernel-enforced mandatory lock.
 
+	// Revisione 37: spostato da `<worktreePath>/reports/<slug>.md` (root del
+	// progetto o del worktree, tracciato da git) a
+	// `<worktreePath>/.pi/extensions/multiAgentOrchestrator/reports/<slug>.md`
+	// (gitignored) — stessa logica di logsDir()/moaSubdirs più sopra: i
+	// report sono reportistica di sviluppo di QUESTO progetto, non
+	// deliverable applicativo, e non devono finire in un repo pubblico.
+	// worktreePath può essere sia un worktree attivo (`.worktrees/<slug>`)
+	// sia identity.cwd dopo il merge — in entrambi i casi risolve dentro il
+	// `.pi/...` di quella specifica directory, quindi il codice più sotto
+	// che copia da wtPath a identity.cwd dopo il merge continua a funzionare
+	// invariato.
+	function reportsDir(base: string): string {
+		return moaSubdirs(moaWorkspaceDir(base)).reports;
+	}
+
 	function reportPath(worktreePath: string, slug: string): string {
-		return path.join(worktreePath, "reports", `${slug}.md`);
+		return path.join(reportsDir(worktreePath), `${slug}.md`);
 	}
 
 	function locksPath(worktreePath: string): string {
@@ -2952,11 +3066,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function planPath(worktreePath: string, slug: string): string {
-		return path.join(worktreePath, "reports", `${slug}.plan.json`);
+		return path.join(reportsDir(worktreePath), `${slug}.plan.json`);
 	}
 
 	function planMarkdownPath(worktreePath: string, slug: string): string {
-		return path.join(worktreePath, "reports", `${slug}.plan.md`);
+		return path.join(reportsDir(worktreePath), `${slug}.plan.md`);
 	}
 
 	function readPlan(worktreePath: string, slug: string): Plan | null {
@@ -3025,7 +3139,7 @@ export default function (pi: ExtensionAPI) {
 			"version, is actually enforced by agent_send (Revisione 21) — a send addressed to a role in a phase that isn't " +
 			"unlocked yet is refused outright, for any sender, not just you. Phase 1 MUST include \"coder\" (its direct " +
 			"correction cycle with reviewer stays internal to phase 1, not separate phases) — this is what stops a plan from " +
-			"ever scheduling a specialist BEFORE coder, which happened in a real test (see docs/mvp-notes.md, Revisione 20). " +
+			"ever scheduling a specialist BEFORE coder, which happened in a real test (see docs/development-notes.md, Revisione 20). " +
 			"ONE exception: phase 1 may be [\"tdd-agent\"] alone (genuine TDD — tests written before implementation), but only " +
 			"if \"coder\" is then in phase 2. The LAST phase MUST include \"docs-sync\" (Revisione 24) — every task plan ends " +
 			"with a documentation pass, not just optionally. A role may appear in only one phase. " +
@@ -3059,7 +3173,7 @@ export default function (pi: ExtensionAPI) {
 			// riding along) so this can't be stretched into the exact loophole the
 			// original rule was hardened against (an arbitrary specialist arguing
 			// it "doesn't depend on the new code" to justify a phase before coder
-			// — see docs/mvp-notes.md, Revisione 20) — and coder must then be the
+			// — see docs/development-notes.md, Revisione 20) — and coder must then be the
 			// very next phase, so it's never more than one phase away.
 			const phase1Roles = params.phases[0].roles.map((r) => r.trim().toLowerCase());
 			const isTddOnlyPhase1 = phase1Roles.length === 1 && phase1Roles[0] === "tdd-agent";
@@ -3631,7 +3745,7 @@ export default function (pi: ExtensionAPI) {
 			"override) may call this. On \"done\", recomputes which dependent tickets just became READY and publishes " +
 			"ticket_ready for each; if every ticket in the run is now done, the run itself is marked completed. On " +
 			"\"failed\", dependents stay blocked — no automatic cascade (replanning to route around a failure is deferred, " +
-			"see docs/mvp-notes.md Revisione 26).",
+			"see docs/development-notes.md Revisione 26).",
 		parameters: Type.Object({
 			ticket_id: Type.String(),
 			status: Type.Union([Type.Literal("done"), Type.Literal("failed")]),
@@ -3697,7 +3811,7 @@ export default function (pi: ExtensionAPI) {
 			"runs automatically for the planner). This is the resumability surface: after a crash/restart, a fresh planner " +
 			"session calls this instead of regenerating the plan, to see exactly what's done, what's in flight, and " +
 			"what's next. A ticket left \"running\" from a dead process is surfaced as running here, not silently treated " +
-			"as done or auto-requeued (automatic crash retry is deferred, see docs/mvp-notes.md Revisione 26).",
+			"as done or auto-requeued (automatic crash retry is deferred, see docs/development-notes.md Revisione 26).",
 		parameters: Type.Object({ run_id: Type.String() }),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("orchestrator not initialised");

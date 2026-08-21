@@ -1,9 +1,9 @@
 {
   "name": "pi-mqtt-orchestrator",
-  "version": "1.0.2",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "MQTT-based multi-agent orchestration extension for Pi (planner/coder/reviewer + a ticket/DAG layer), with a global `po` CLI (po init / po start) for scaffolding and launching new orchestrated projects.",
+  "description": "MQTT-based multi-agent orchestration extension for Pi (planner/coder/reviewer + a ticket/DAG layer), with a global `po` CLI (po init / po start / po end) for scaffolding, launching, and closing out orchestrated projects.",
   "homepage": "https://github.com/alessiobacin/pi-mqtt-orchestrator",
   "repository": {
     "type": "git",
@@ -23,6 +23,7 @@
     "launch-planner": "node scripts/launch-planner.mjs",
     "check-skill-isolation": "node scripts/check-skill-isolation.mjs",
     "create-project": "node scripts/create-project.mjs",
+    "end-project": "node scripts/end-project.mjs",
     "setup-dev-stubs": "node scripts/setup-dev-stubs.mjs"
   },
   "dependencies": {

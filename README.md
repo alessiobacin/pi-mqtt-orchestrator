@@ -19,7 +19,8 @@ Everything communicates over a local MQTT broker, using role/instance identity a
 - **A watchdog** that detects stalled tickets and automatically escalates them
 - **Phased execution plans** — the planner declares which roles work together and in what order, and the system enforces it
 - **WhatsApp notifications** (via Evolution API) when a task completes or needs your input, so you don't have to watch the terminal
-- **A global `po` CLI** (`po init`, `po start`, `po doctor`, `po update`, `po uninstall`) for scaffolding, launching, verifying the environment, and keeping new orchestrated projects up to date
+- **A global `po` CLI** (`po init`, `po start`, `po doctor`, `po update`, `po uninstall`, `po end`) for scaffolding, launching, verifying the environment, keeping new orchestrated projects up to date, and closing them out
+- **Automatic per-project MQTT scoping** — two different projects never collide on a shared broker without you having to pass `--project` yourself
 - **Cross-platform** — macOS, Linux, and Windows
 
 ## Installation
@@ -70,6 +71,20 @@ po uninstall        # remove the global installation (asks for confirmation; add
 
 **If you scaffolded a project with an older `po init`** (one that still copied `extensions/` into new projects), that project directory may have its own leftover `extensions/orchestrator.ts`. `po start` will warn you if it finds one outside this package's own repo — delete that folder (`rm -rf extensions` / `Remove-Item -Recurse -Force extensions`) and re-run `po start`; it's no longer needed once the extension is installed globally.
 
+**If you scaffolded a project before this change**, its root-level `reports/`, `prompts/`, and `logs/` folders (development artifacts of working with this extension — task reports, role prompts, per-instance debug traces) were tracked by git like any other file, right alongside your actual application code. As of `po init --llmp`/plain `po init`, all three now live under the already-gitignored `.pi/extensions/multiAgentOrchestrator/` instead, so they never end up in a public push by default. Nothing migrates automatically for an existing project — if you want the same treatment there, `git rm -r --cached reports prompts logs` (whichever exist) and move their contents under `.pi/extensions/multiAgentOrchestrator/{reports,prompts,logs}` by hand; if any of them were already pushed to a public remote, removing them from tracking going forward does not erase that history — see `docs/development-notes.md`, Revisione 37, if you need to scrub it from a remote that's already public.
+
+### Closing out a project
+
+```bash
+po end                       # list this project's "active" runs and, on confirmation, mark them "completed"
+po end --list                # just list them, no changes
+po end --run <run_id>        # close one specific run instead of every active one
+po end --status cancelled    # mark as cancelled instead of completed (also accepts "failed")
+po end --yes                 # skip the confirmation prompt
+```
+
+A run (the ticket/DAG layer's top-level container for one objective — see "Layer ticket/DAG persistente" in `docs/development-notes.md`, Revisione 26) normally closes itself once every one of its tickets is marked done. `po end` is for when that doesn't happen — a session ended before every ticket was formally completed, the goal changed, or you're simply satisfied with where things landed and want to declare it done. It never touches tickets, worktrees, or any file outside this project's own `orchestrator.db` — closing a run just changes its own status and records the change in its event history, visible later via `run_status` from inside a planner session.
+
 ### Optional: local llmproxy config
 
 If you run `pi` against a local LLM proxy instead of a cloud provider directly, `po init --llmp` also writes `.pi/agent/models.json` and `.pi/agent/settings.json` in the scaffolded project, pre-configured for a proxy listening on `http://127.0.0.1:7045` (provider `llmproxy`, dark theme). It won't overwrite either file if it already exists — pass `--force` too if you want to reset them back to these defaults.
@@ -117,7 +132,9 @@ Without a `.env`, the extension runs normally — notifications are simply skipp
 
 ```
 extensions/orchestrator.ts   the Pi extension itself — identity, MQTT, tools, prompts
-prompts/                     system prompt for each role (planner, coder, reviewer, specialists)
+prompts/                     system prompt for each role (planner, coder, reviewer, specialists) —
+                              the source copy; `po init` copies it into every scaffolded project's
+                              own .pi/extensions/multiAgentOrchestrator/prompts/, not its root
 agents/roles.yaml            per-role defaults and the specialist roster
 agents/agents.yaml            example instance configuration
 bin/po.mjs                   the `po` CLI (init/start/doctor/update/uninstall)
@@ -130,7 +147,7 @@ docs/                        architecture diagrams and detailed development note
 
 ## Contributing
 
-Contributions are welcome — open an issue or a pull request. `docs/mvp-notes.md` has the detailed engineering history and design rationale behind each part of the system, if you want the full context before diving in.
+Contributions are welcome — open an issue or a pull request. `docs/development-notes.md` has the detailed engineering history and design rationale behind each part of the system, if you want the full context before diving in.
 
 ## License
 

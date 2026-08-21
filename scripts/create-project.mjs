@@ -3,7 +3,7 @@
 // directory a scelta — copia agents/prompts/mqtt/.env.example da QUESTO
 // pacchetto e scrive un package.json NUOVO, specifico del progetto (mai
 // quello del pacchetto), inizializza un repo git (serve per l'isolamento in
-// worktree, vedi docs/mvp-notes.md Revisioni 13/14).
+// worktree, vedi docs/development-notes.md Revisioni 13/14).
 //
 // Revisione 33 — NON copia più extensions/: da quando l'estensione si
 // installa globalmente (`pi extension install`, Revisione 31), `pi` la
@@ -13,9 +13,10 @@
 // revisione) causa un doppio caricamento: stessi tool/flag registrati due
 // volte, `pi` si rifiuta con "Tool ... conflicts with ...". Scoperto da un
 // test reale dell'operatore su una macchina Windows nuova — vedi Revisione
-// 33 in docs/mvp-notes.md per il traceback completo e l'analisi. Un
+// 33 in docs/development-notes.md per il traceback completo e l'analisi. Un
 // progetto scaffoldato ora contiene solo CONFIGURAZIONE
-// (agents/roles.yaml, prompts/*.md, mqtt/, .env.example), mai il codice
+// (agents/roles.yaml, .pi/extensions/multiAgentOrchestrator/prompts/*.md —
+// spostato lì in Revisione 37, vedi sotto —, mqtt/, .env.example), mai il codice
 // dell'estensione: `pi`/`configDir`/`promptsDir` la risolvono comunque
 // relativa alla cwd del progetto, indipendentemente da dove il CODICE
 // dell'estensione è stato caricato (verificato leggendo loadConfig()/
@@ -32,14 +33,14 @@
 // sottocomandi. Inventare `pi orchestrator init` come comando shell reale
 // sarebbe una funzionalità non verificata — esattamente il tipo di cosa che
 // questo progetto evita di documentare come se funzionasse (vedi la
-// disciplina "verificato / non verificato" in docs/mvp-notes.md). Questo
+// disciplina "verificato / non verificato" in docs/development-notes.md). Questo
 // script è l'equivalente reale, verificato, dello stesso bisogno: un
 // comando a riga di comando che prepara un progetto nuovo pronto all'uso.
 //
 // Revisione 31: la logica qui sotto è ora esportata come runCreateProject()
 // e chiamata dal binario globale unificato `po init` (bin/po.mjs, campo
 // "bin" di package.json) invece di essere un binario a sé
-// (`pi-orchestrator-init`, rinominato — vedi docs/mvp-notes.md Revisione
+// (`pi-orchestrator-init`, rinominato — vedi docs/development-notes.md Revisione
 // 31). Restano invariati sia l'uso diretto via `node scripts/create-project.mjs`
 // sia tutta la logica di scaffolding.
 //
@@ -164,20 +165,35 @@ export async function runCreateProject({ packageRoot, cwd, argv }) {
 
 	console.log(`create-project: creo il progetto "${name}" in ${targetDir}${inPlace ? " (in place)" : ""}`);
 
-	// 1. Copia SOLO configurazione (agents/prompts/mqtt) dal pacchetto — MAI
-	//    extensions/ (Revisione 33, vedi commento in testa al file: il codice
-	//    dell'estensione vive nel pacchetto installato globalmente, `pi` lo
-	//    carica da lì in automatico) e MAI il package.json del pacchetto
-	//    stesso (motivo per cui questo script esiste: evitare che un
-	//    progetto nuovo erediti l'identità/il nome del pacchetto invece del
-	//    proprio, il problema reale osservato in moa-test-project — vedi
-	//    docs/mvp-notes.md, Revisione 28).
-	for (const dir of ["agents", "prompts", "mqtt"]) {
+	// 1. Copia SOLO configurazione (agents/mqtt qui, prompts/ poco più sotto
+	//    con una destinazione diversa — vedi quel commento) dal pacchetto —
+	//    MAI extensions/ (Revisione 33, vedi commento in testa al file: il
+	//    codice dell'estensione vive nel pacchetto installato globalmente,
+	//    `pi` lo carica da lì in automatico) e MAI il package.json del
+	//    pacchetto stesso (motivo per cui questo script esiste: evitare che
+	//    un progetto nuovo erediti l'identità/il nome del pacchetto invece
+	//    del proprio, il problema reale osservato in moa-test-project — vedi
+	//    docs/development-notes.md, Revisione 28).
+	for (const dir of ["agents", "mqtt"]) {
 		const src = path.join(packageRoot, dir);
 		if (fs.existsSync(src)) copyDir(src, path.join(targetDir, dir));
 	}
 	const envExample = path.join(packageRoot, ".env.example");
 	if (fs.existsSync(envExample)) fs.copyFileSync(envExample, path.join(targetDir, ".env.example"));
+
+	// prompts/ va in .pi/extensions/multiAgentOrchestrator/prompts, NON nella
+	// root del progetto (Revisione 37, richiesto dall'operatore): sono
+	// prompt di ruolo che si personalizzano nell'ESTENSIONE una volta per
+	// tutte, non per singolo progetto — un fork per-progetto di prompts/
+	// tracciato da git avrebbe solo invitato a divergere copia per copia. La
+	// stessa cartella `.pi/` è già gitignored di default (vedi punto 4 più
+	// sotto), quindi anche se qualcuno la personalizza a mano dentro un
+	// progetto scaffoldato, resta locale a quella macchina e non finisce mai
+	// in un push pubblico.
+	const promptsSrc = path.join(packageRoot, "prompts");
+	if (fs.existsSync(promptsSrc)) {
+		copyDir(promptsSrc, path.join(targetDir, ".pi", "extensions", "multiAgentOrchestrator", "prompts"));
+	}
 
 	// 2. package.json NUOVO, minimo, specifico del progetto — solo
 	//    identità/metadata (Revisione 33: nessuna dipendenza da installare
@@ -267,15 +283,19 @@ export async function runCreateProject({ packageRoot, cwd, argv }) {
 		}
 	}
 
-	// 4. .gitignore minimo (worktree/node_modules/logs), git init se non è
-	//    già un repo — richiesto per l'isolamento in worktree (docs/mvp-notes.md,
+	// 4. .gitignore minimo (worktree/node_modules), git init se non è già un
+	//    repo — richiesto per l'isolamento in worktree (docs/development-notes.md,
 	//    Revisioni 13/14).
 	const gitignorePath = path.join(targetDir, ".gitignore");
 	if (!fs.existsSync(gitignorePath)) {
 		// .pi/ qui è la workspace runtime dell'estensione nel progetto scaffoldato
 		// (SQLite orchestrator.db, config/project.json, specs/tickets — Revisioni
-		// 26-28), non codice: locale per macchina/progetto, mai da condividere.
-		fs.writeFileSync(gitignorePath, ["node_modules/", ".worktrees/", "logs/", ".env", ".pi/", "*.db", "*.db-journal", ""].join("\n"));
+		// 26-28; report, prompt di ruolo, e log di debug per-istanza dalla
+		// Revisione 37 — vedi extensions/orchestrator.ts, moaSubdirs), non
+		// codice: locale per macchina/progetto, mai da condividere. Non serve
+		// più una voce "logs/" separata a livello di root: dalla Revisione 37
+		// quel log vive dentro .pi/, già coperto qui.
+		fs.writeFileSync(gitignorePath, ["node_modules/", ".worktrees/", ".env", ".pi/", "*.db", "*.db-journal", ""].join("\n"));
 	}
 	if (!fs.existsSync(path.join(targetDir, ".git"))) {
 		try {
@@ -313,12 +333,15 @@ export async function runCreateProject({ packageRoot, cwd, argv }) {
 		console.log("  # senza Docker Desktop: installa Mosquitto nativo (https://mosquitto.org/download/ o `winget install EclipseFoundation.Mosquitto`)");
 		console.log("  #   poi: mosquitto -c mqtt\\mosquitto.conf   (in una finestra PowerShell separata)");
 	}
-	console.log("  po start --instance planner-01");
+	console.log("  po start --instance planner-01   # planner SEMPRE così, mai `pi` a mano — vedi sotto");
 	console.log("");
-	console.log("Nota: questo scaffold NON include la cartella delle skill vendorizzate di mattpocock (le skill Wayfinder/To-Spec");
-	console.log("sono un extra pesante, non necessario per iniziare) — `po start` le include comunque dall'installazione globale");
-	console.log("del pacchetto stesso (non dal progetto scaffoldato). Il planner userà gli 8 tool del layer ticket/DAG di default");
-	console.log("fin dal primo task (vedi prompts/planner.md) — non serve nominarli nel prompt che gli dai.");
+	console.log("IMPORTANTE — planner va lanciato SOLO con `po start`, mai con `pi --instance planner-01 --role planner` a mano:");
+	console.log("`po start` è l'unico modo in cui le skill vendorizzate di mattpocock (Wayfinder/To-Spec, più grilling/domain-modeling");
+	console.log("che invocano) vengono cablate nella sessione, dall'installazione globale del pacchetto (non dal progetto scaffoldato —");
+	console.log("questo scaffold non le include). Lanciato a mano, il planner parte comunque ma senza quelle skill: usa in automatico un");
+	console.log("metodo di scoping equivalente ma più semplice, integrato nel suo prompt (vedi Revisione 38 in docs/development-notes.md).");
+	console.log("coder/reviewer/specialisti non hanno bisogno di questo — per loro `pi -e ...` a mano va benissimo. Il planner userà gli 8");
+	console.log("tool del layer ticket/DAG di default fin dal primo task (vedi .pi/extensions/multiAgentOrchestrator/prompts/planner.md).");
 }
 
 // Uso diretto: `node scripts/create-project.mjs ...` (dev, dal repo del pacchetto).

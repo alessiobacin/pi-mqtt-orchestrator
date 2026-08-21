@@ -2,7 +2,7 @@ name: CI
 
 # Esegue la suite di verifica reale di questo repo (non solo lint/build) a
 # ogni push/PR — richiesto dall'operatore prima di rendere pubblico questo
-# repo (vedi docs/mvp-notes.md, Revisione 31). Nessuno di questi step
+# repo (vedi docs/development-notes.md, Revisione 31). Nessuno di questi step
 # richiede la CLI `pi` reale: check-syntax.mjs e tutti gli
 # script/smoke-test-*.mjs + e2e-full-flow.mjs sono pensati apposta per
 # essere eseguibili con solo Node, un broker MQTT locale, e (per gli script
@@ -73,6 +73,8 @@ jobs:
           node --experimental-strip-types scripts/smoke-test-response-wakeup.mjs
           node --experimental-strip-types scripts/smoke-test-worktree-cwd-guard.mjs
           node --experimental-strip-types scripts/smoke-test-ticket-engine.mjs
+          node --experimental-strip-types scripts/smoke-test-project-scoping.mjs
+          node --experimental-strip-types scripts/smoke-test-end-project.mjs
           node --experimental-strip-types scripts/e2e-full-flow.mjs
 
       - name: po CLI smoke test (init in place + start --print-only, via a real global install)
@@ -80,5 +82,14 @@ jobs:
           npm install -g .
           mkdir -p /tmp/po-ci-test && cd /tmp/po-ci-test
           po init --name "CI Test Project"
-          test -f extensions/orchestrator.ts
+          # Revisione 33: create-project.mjs stopped copying extensions/ into
+          # scaffolded projects (the code loads from the global install
+          # instead) — this used to assert extensions/orchestrator.ts, which
+          # a post-Revisione-33 scaffold never has; assert what's actually
+          # guaranteed to exist instead.
+          test -f agents/roles.yaml
+          test -f .pi/extensions/multiAgentOrchestrator/config/project.json
+          test -f .pi/extensions/multiAgentOrchestrator/prompts/planner.md
+          test ! -e extensions/orchestrator.ts
           po start --instance planner-01 --print-only | grep -q -- "--role planner"
+          po end | grep -q -- "niente da chiudere"

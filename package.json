@@ -1,6 +1,6 @@
 {
   "name": "pi-mqtt-orchestrator",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "private": true,
   "type": "module",
   "description": "MQTT-based multi-agent orchestration extension for Pi (planner/coder/reviewer + a ticket/DAG layer), with a global `po` CLI (po init / po start / po end) for scaffolding, launching, and closing out orchestrated projects.",

@@ -6,6 +6,86 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 45 — `frontend-developer` passa SEMPRE da reviewer, in un ciclo, prima del planner
+
+**Richiesta dell'operatore (testuale)**: "così come reviewer controlla in un
+flusso continuo quello che fa [coder] lo stesso modo voglio che quello che fa
+frontend agent venga controllato da reviewer perché si controlli se
+effettivamente la modifica richiesta a livello di frontend è stata
+effettivamente modificata si rientra nel ciclo e frontend agent deve fare la
+modifica come richiesto questo deve essere un ciclo fino a che il frontend non
+fa e conclude design desiderato".
+
+**Il gap**: `frontend-developer` (fase 6 — UX/UI, `agents/roles.yaml`) non
+aveva un `prompts/frontend-developer.md` proprio — usava il protocollo
+generico `prompts/specialist.md`, che al passo 3 biforca in "hai trovato un
+problema che richiede una fix" (va a coder, tu riverifichi) oppure **"il tuo
+lavoro è già il risultato finale"** (rispondi direttamente al planner, nessun
+passaggio da reviewer). Per un ruolo il cui output tipico È il risultato
+finale (una modifica UI), quel secondo ramo si applicava sempre: il lavoro di
+frontend-developer poteva essere segnalato "completo" al planner senza che
+nessuno avesse mai verificato se la modifica di design effettivamente
+richiesta fosse presente nel worktree — reviewer già copre esattamente questo
+tipo di verifica per coder (vedi `prompts/reviewer.md`, sezione dedicata), ma
+non veniva mai coinvolto per frontend-developer.
+
+**La correzione**:
+
+1. **Nuovo `prompts/frontend-developer.md`** (bespoke, sullo stile di
+   `prompts/docs-sync.md`/`prompts/security-evaluator.md` — Revisione 28/21):
+   frontend-developer ora manda SEMPRE il proprio lavoro a reviewer con
+   `agent_send target_role: "reviewer"`, mai direttamente a planner, sia nel
+   flusso normale (da planner/coder) sia quando è l'utente a interpellarlo
+   per primo. Il messaggio a reviewer deve includere esplicitamente **cos'era
+   stato richiesto**, non solo cosa è stato fatto, così reviewer può
+   confrontare i due senza dover ricostruire la cronologia del task da solo.
+   Se reviewer respinge (`target_role: "frontend-developer"`), il file
+   istruisce a trattarlo come un nuovo round: correggere nello stesso
+   worktree, riverificare da sé, rimandare di nuovo a reviewer — **in loop**,
+   finché reviewer non approva, con lo stesso spegnimento di sicurezza già
+   usato altrove nel progetto (se dopo 3-4 tentativi il problema persiste,
+   è reviewer stesso a notificare il planner invece di continuare
+   all'infinito, mai frontend-developer che decide di forzare la chiusura da
+   solo).
+2. **`prompts/reviewer.md`**: nuova sezione dedicata "Quando ricevi una
+   richiesta di revisione da frontend-developer", che affianca (non
+   sostituisce) quella già esistente per coder. La differenza esplicita
+   rispetto al giro con coder: qui il criterio primario non è "il codice
+   compila/i test passano" ma **"la modifica di design/UI specificamente
+   richiesta è davvero presente nel worktree"** — un componente che compila e
+   supera i test automatici ma mostra un colore/layout/comportamento diverso
+   da quello richiesto va comunque RESPINTO. Il respingimento va a
+   `target_role: "frontend-developer"`, non a `"coder"`. Aggiornata anche la
+   nota finale del file per chiarire che frontend-developer è un caso a
+   parte con questo ciclo dedicato, non un generico "altro specialista".
+3. **`scripts/smoke-test-specialist-prompt.mjs`**: nuovo blocco `2d` che
+   verifica (a) `frontend-developer` risolve al proprio file bespoke, non al
+   fallback generico `specialist.md`; (b) il testo renderizzato contiene
+   `target_role: "reviewer"`; (c) NON contiene `target_role: "planner"` —
+   verifica automatica e concreta che il bypass del vecchio protocollo
+   generico non possa ripresentarsi silenziosamente in una revisione futura.
+
+**Nessuna modifica a `extensions/orchestrator.ts`**: come il ciclo
+coder↔reviewer già esistente, questo meccanismo è interamente a livello di
+prompt/comportamento dell'agente (quale `target_role` scegliere in
+`agent_send`), non imposto a livello di codice/tool — `agent_send` non
+impedisce strutturalmente a un agente di scrivere a un `target_role`
+qualsiasi; è il testo del prompt a determinare chi viene coinvolto e quando.
+Onestà sui limiti: come per il ciclo coder↔reviewer, questa è una convenzione
+di comportamento che il modello segue leggendo il proprio prompt di ruolo, non
+una garanzia strutturale imposta dal codice — non diversamente da come
+funziona già oggi per coder/reviewer in questo stesso progetto.
+
+**Verifica eseguita**: `check-syntax`, `check-skill-isolation`, l'intera
+suite `smoke-test-*.mjs` (incluso il nuovo blocco `2d` in
+`smoke-test-specialist-prompt.mjs`), `e2e-full-flow.mjs`, e un giro completo
+di `po init`/`po start --print-only`/`po end` su un progetto scaffoldato da
+zero (confermato: `.pi/extensions/multiAgentOrchestrator/prompts/frontend-developer.md`
+viene copiato correttamente nello scaffold, come già avviene per
+docs-sync.md/security-evaluator.md).
+
+**Versione**: `1.2.3` → `1.2.4`.
+
 ## Revisione 44 — `po start`/`launch-planner.mjs` generalizzato a QUALUNQUE ruolo: chiude il vero bug dietro "il planner non riesce a rilanciare gli agenti su herdr"
 
 **Trigger reale**: l'operatore ha incollato il transcript di ragionamento di un

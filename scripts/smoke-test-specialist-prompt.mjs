@@ -101,6 +101,17 @@ function main() {
 	assert.match(dsRendered, /QUICK-START\.md/);
 	console.log("   OK — docs-sync.md renders cleanly and is picked up ahead of specialist.md");
 
+	console.log("2d. frontend-developer now has its own bespoke prompt (Revisione 45 — always routes through reviewer, never straight to planner) and takes priority over specialist.md...");
+	const { text: fdText, source: fdSource } = loadRolePrompt(ROOT, "prompts", "frontend-developer", cfg.roles["frontend-developer"]);
+	assert.equal(fdSource, "bespoke", "frontend-developer should now use its own prompts/frontend-developer.md, not the generic template");
+	assert.ok(fdText.length > 1000, "frontend-developer.md should have real, substantial content");
+	const fdRendered = render(fdText, { instance: "frontend-developer-01", role: "frontend-developer", project: "demo", team: ["core", "frontend"] }, cfg.roles["frontend-developer"]);
+	assert.ok(!fdRendered.includes("{{"), "no unfilled placeholders should remain after rendering");
+	assert.match(fdRendered, /frontend-developer-01/);
+	assert.match(fdRendered, /target_role:\s*"reviewer"/, "frontend-developer.md must instruct sending work to reviewer, not straight to planner");
+	assert.ok(!/target_role:\s*"planner"/.test(fdRendered), "frontend-developer.md must NOT instruct sending its own work directly to planner");
+	console.log("   OK — frontend-developer.md renders cleanly, is picked up ahead of specialist.md, and always routes through reviewer");
+
 	console.log("3. ALL roles in the roster render cleanly with no leftover placeholders...");
 	const roster = Object.keys(cfg.roles).filter((r) => !["planner", "coder", "reviewer"].includes(r));
 	assert.ok(roster.length >= 20, `expected a large specialist roster, got ${roster.length}`);

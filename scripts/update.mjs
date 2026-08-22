@@ -212,6 +212,14 @@ export function runUpdate({ packageRoot, argv }) {
 				"`pi extension install <url>`.",
 		);
 	}
+
+	console.log(
+		"\npo update: i prompt di ruolo di OGNI progetto (anche già scaffoldato prima di questo update) si leggono " +
+			"sempre dal pacchetto installato (Revisione 47) — nessun passo aggiuntivo necessario, a meno che tu " +
+			"non abbia attivato `--custom-prompts` per un progetto specifico (vedi `po copy-prompts`), nel qual " +
+			"caso solo i file che hai personalizzato lì restano tuoi: qualunque altro ruolo/file continua comunque " +
+			"a leggere questa versione appena aggiornata.",
+	);
 }
 
 // Uso diretto: `node scripts/update.mjs ...` (dev, dal repo del pacchetto).

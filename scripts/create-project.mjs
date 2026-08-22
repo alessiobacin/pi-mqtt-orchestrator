@@ -14,14 +14,25 @@
 // volte, `pi` si rifiuta con "Tool ... conflicts with ...". Scoperto da un
 // test reale dell'operatore su una macchina Windows nuova — vedi Revisione
 // 33 in docs/development-notes.md per il traceback completo e l'analisi. Un
-// progetto scaffoldato ora contiene solo CONFIGURAZIONE
-// (agents/roles.yaml, .pi/extensions/multiAgentOrchestrator/prompts/*.md —
-// spostato lì in Revisione 37, vedi sotto —, mqtt/, .env.example), mai il codice
-// dell'estensione: `pi`/`configDir`/`promptsDir` la risolvono comunque
-// relativa alla cwd del progetto, indipendentemente da dove il CODICE
-// dell'estensione è stato caricato (verificato leggendo loadConfig()/
-// loadRolePrompt() in extensions/orchestrator.ts: usano sempre
-// `identity.cwd`, mai il percorso del modulo stesso).
+// progetto scaffoldato contiene solo CONFIGURAZIONE (agents/roles.yaml,
+// mqtt/, .env.example), mai il codice dell'estensione.
+//
+// Revisione 47 — NON copia più prompts/ nel progetto: da Revisione 37 a
+// Revisione 46 questo script copiava prompts/ dentro
+// .pi/extensions/multiAgentOrchestrator/prompts/ del progetto scaffoldato —
+// ma quella copia restava STATICA per sempre: `po update` (Revisione 34)
+// aggiornava solo le due copie GLOBALI del pacchetto, mai quella
+// per-progetto, quindi un progetto scaffoldato tempo fa restava
+// silenziosamente indietro rispetto a ogni correzione di prompt successiva
+// (bug reale osservato su un progetto vero — vedi Revisione 46). Ora i
+// prompt di ruolo si leggono SEMPRE dal pacchetto installato
+// (resolveGlobalPromptsDir() in extensions/orchestrator.ts, risolta dalla
+// posizione reale del file caricato — mai da un percorso ipotizzato): un
+// progetto scaffoldato non ha più bisogno di una copia propria, e `po
+// update` funziona correttamente senza nessun passo aggiuntivo. Chi vuole
+// prompt personalizzati per UN progetto specifico usa `po copy-prompts`
+// (crea la copia locale) e lancia quell'istanza con `po start ...
+// --custom-prompts` (vedi README).
 //
 // PERCHÉ QUESTO SCRIPT ESISTE INVECE DI UN VERO SUBCOMMAND `pi orchestrator
 // init` (richiesta dell'operatore, Revisione 28): non esiste, in questo
@@ -181,19 +192,10 @@ export async function runCreateProject({ packageRoot, cwd, argv }) {
 	const envExample = path.join(packageRoot, ".env.example");
 	if (fs.existsSync(envExample)) fs.copyFileSync(envExample, path.join(targetDir, ".env.example"));
 
-	// prompts/ va in .pi/extensions/multiAgentOrchestrator/prompts, NON nella
-	// root del progetto (Revisione 37, richiesto dall'operatore): sono
-	// prompt di ruolo che si personalizzano nell'ESTENSIONE una volta per
-	// tutte, non per singolo progetto — un fork per-progetto di prompts/
-	// tracciato da git avrebbe solo invitato a divergere copia per copia. La
-	// stessa cartella `.pi/` è già gitignored di default (vedi punto 4 più
-	// sotto), quindi anche se qualcuno la personalizza a mano dentro un
-	// progetto scaffoldato, resta locale a quella macchina e non finisce mai
-	// in un push pubblico.
-	const promptsSrc = path.join(packageRoot, "prompts");
-	if (fs.existsSync(promptsSrc)) {
-		copyDir(promptsSrc, path.join(targetDir, ".pi", "extensions", "multiAgentOrchestrator", "prompts"));
-	}
+	// Revisione 47: prompts/ NON viene più copiato qui — vedi il commento in
+	// testa al file. Un progetto scaffoldato non ha una propria cartella
+	// prompts/ finché non si esegue `po copy-prompts` (facoltativo, solo per
+	// chi vuole personalizzare i prompt di UN progetto specifico).
 
 	// 2. package.json NUOVO, minimo, specifico del progetto — solo
 	//    identità/metadata (Revisione 33: nessuna dipendenza da installare
@@ -344,7 +346,12 @@ export async function runCreateProject({ packageRoot, cwd, argv }) {
 	console.log("(Revisione 44 — nessun `-e` a mano, funziona per qualunque ruolo esattamente come per planner, senza le skill mattpocock)");
 	console.log("oppure `pi --instance <nome> --role <ruolo>` direttamente, MAI `pi -e extensions/orchestrator.ts ...`: questo scaffold non");
 	console.log("include più quel file (Revisione 33), l'estensione si carica da sola dall'installazione globale. Il planner userà gli 8");
-	console.log("tool del layer ticket/DAG di default fin dal primo task (vedi .pi/extensions/multiAgentOrchestrator/prompts/planner.md).");
+	console.log("tool del layer ticket/DAG di default fin dal primo task.");
+	console.log("");
+	console.log("I prompt di ruolo (planner/coder/reviewer/specialisti) si leggono SEMPRE dal pacchetto installato (Revisione 47) — un");
+	console.log("`po update` li aggiorna per questo progetto senza nessun passo in più. Per personalizzarli SOLO per questo progetto:");
+	console.log("`po copy-prompts` (copia i prompt correnti in .pi/extensions/multiAgentOrchestrator/prompts/, poi modificali), quindi");
+	console.log("lancia quell'istanza con `po start --instance <nome> --role <ruolo> --custom-prompts` per usarli davvero.");
 }
 
 // Uso diretto: `node scripts/create-project.mjs ...` (dev, dal repo del pacchetto).

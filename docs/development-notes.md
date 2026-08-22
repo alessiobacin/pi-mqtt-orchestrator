@@ -6,6 +6,209 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 47 — `--custom-prompts` + `po copy-prompts`: i prompt di ruolo si leggono SEMPRE dal pacchetto globale per default, `po sync-prompts` eliminato
+
+**Richiesta esplicita dell'operatore**, subito dopo aver ricevuto la
+Revisione 46: a lui non piace dover lanciare un comando di sync dentro ogni
+progetto ogni volta che aggiorna il pacchetto globale. Vuole un design
+diverso — citando testualmente la richiesta:
+
+> "Non mi piace il fatto che tutte le volte che faccio un update a Multi
+> Agent Orchestrator devo anche lanciare il comando di sync all'interno del
+> progetto. [...] un nuovo comando "po start... --custom-prompts" serve a
+> caricare i prompt custom che sono all'interno del progetto altrimenti
+> vengono sempre caricati quelli nel folder globale dell'estensione. [...]
+> quando faccio "po update" tutto funziona correttamente. La cartella
+> prompt, quando si fa "po init..." non ci deve essere e se invece io voglio
+> copiare i prompt dalla versione globale dell'estensione, per
+> customizzarli, devo avere un comando tipo "po copy-prompts" [...] Per
+> rendere tutto ancora più sicuro, se comunque la cartella "prompts" non c'è
+> [...] il sistema in automatico deve prendere i prompt nella cartella
+> dell'estensione installata globalmente."
+
+In altre parole: la Revisione 46 (`po sync-prompts`) era un tampone — chiudeva
+il sintomo (un progetto poteva essere riallineato a mano) ma lasciava intatta
+la causa strutturale (un progetto scaffoldato ha sempre una sua copia statica
+di `prompts/`, che può tornare stale). La Revisione 47 elimina la causa: per
+default NESSUN progetto ha più una propria copia dei prompt di ruolo, quindi
+non c'è più nulla da tenere sincronizzato.
+
+**Design implementato**:
+
+- **`resolveGlobalPromptsDir()`** (`extensions/orchestrator.ts`) — usa
+  `fileURLToPath(import.meta.url)` per risalire alla posizione REALE di
+  QUESTO file in esecuzione (che sia il pacchetto npm globale, il clone di
+  `pi extension install`, o un checkout di sviluppo locale — vedi Revisione
+  34 per la differenza tra le due copie globali) e ne prende la sotto-cartella
+  `prompts/` come sorgente "globale". Zero configurazione, zero rischio di
+  puntare all'installazione sbagliata: è sempre la stessa copia che `pi` ha
+  effettivamente caricato in questa sessione.
+- **`loadRolePrompt(primaryDir, fallbackDir, role, roleCfg)`** riscritta con
+  un cascade FILE PER FILE, non cartella-per-cartella: controlla
+  `<role>.md` in `primaryDir`, poi (se `fallbackDir` non è `null`) in
+  `fallbackDir`; solo se nessuno dei due ha un bespoke file per quel ruolo,
+  ripete lo stesso controllo per `specialist.md` (per i ruoli con un
+  `brief`), infine il fallback generico built-in. Senza `--custom-prompts`,
+  `primaryDir` è la cartella globale e `fallbackDir` è `null` — la copia
+  locale di un progetto (se esiste, es. residuo di una Revisione precedente
+  a questa) viene ignorata del tutto. Con `--custom-prompts`, `primaryDir`
+  diventa la cartella locale del progetto e `fallbackDir` la cartella
+  globale.
+- **Perché file-per-file e non cartella-per-cartella** (miglioramento
+  rispetto alla richiesta letterale, che descriveva solo un controllo di
+  esistenza a livello di cartella): se un operatore personalizza SOLO
+  `coder.md` con `po copy-prompts` + editing manuale, e poi attiva
+  `--custom-prompts`, ogni altro ruolo (`reviewer.md`, `planner.md`, ecc.)
+  continua comunque a leggersi fresco dal pacchetto globale ad ogni
+  `po update` — impossibile ricadere nello stesso identico bug della
+  Revisione 46 per un file che l'operatore non ha mai scelto di congelare.
+  Un controllo a livello di cartella (tutto-o-niente) avrebbe invece
+  ri-creato esattamente quel rischio per QUALSIASI ruolo non personalizzato,
+  nel momento in cui almeno un ruolo veniva personalizzato.
+- **`po copy-prompts`** (`scripts/copy-prompts.mjs`, nuovo — sostituisce
+  interamente `po sync-prompts`/`scripts/sync-prompts.mjs`, ora rimossi)
+  copia `prompts/` dal pacchetto installato dentro
+  `.pi/extensions/multiAgentOrchestrator/prompts/` del progetto corrente, per
+  chi vuole personalizzare — non cambia da solo alcun comportamento: serve
+  comunque `po start ... --custom-prompts` per farla leggere davvero. Stesso
+  principio di backup-prima-di-sovrascrivere già usato da `po sync-prompts`
+  (`prompts.bak-<timestamp>`, sibling di `prompts/`).
+- **`po init` non crea più `prompts/`** in un progetto appena scaffoldato
+  (`scripts/create-project.mjs` — rimosso il blocco che la copiava). Un
+  progetto scaffoldato oggi non ha alcuna copia locale finché non si esegue
+  `po copy-prompts` di proposito.
+- **Safety net esplicitamente richiesta dall'operatore**: se `--custom-prompts`
+  è passato ma la cartella locale `prompts/` non esiste affatto (es. non è
+  mai stato lanciato `po copy-prompts`), il sistema ricade in automatico
+  sulla cartella globale per OGNI ruolo — nessun crash, nessuna istanza
+  senza istruzioni.
+- **`scripts/update.mjs`**: rimosso il promemoria "ATTENZIONE, lancia `po
+  sync-prompts`" introdotto dalla Revisione 46 (non più necessario), sostituito
+  con un messaggio che conferma che `po update` ora funziona correttamente
+  per ogni progetto senza alcun passo aggiuntivo, a meno che non si sia
+  attivato `--custom-prompts` da qualche parte.
+
+**Verificato**: `scripts/smoke-test-copy-prompts.mjs` (nuovo, 13 asserzioni,
+spawna il vero `bin/po.mjs copy-prompts`) copre lo stesso terreno che
+copriva `smoke-test-sync-prompts.mjs` (ora rimosso insieme al comando che
+testava). `scripts/smoke-test-custom-prompts.mjs` (nuovo) è un vero e2e
+contro il codice REALE di `extensions/orchestrator.ts` (import dinamico,
+non un mirror), con un vero round-trip di sessione/MQTT su un broker
+mosquitto locale, e copre le 4 combinazioni: default ignora sempre la copia
+locale; `--custom-prompts` con file locale presente lo usa; `--custom-prompts`
+su un ruolo senza file locale ricade sul pacchetto (cascade per-file, non
+tutto-o-niente); `--custom-prompts` con l'intera cartella locale assente
+ricade comunque sul pacchetto senza errori. `scripts/smoke-test-specialist-prompt.mjs`
+aggiornato alla nuova firma `(primaryDir, fallbackDir, role, roleCfg)` di
+`loadRolePrompt()` con un nuovo blocco 4 (fs-only, senza broker, stessa
+logica di cascade verificata più rapidamente). CI aggiornata: rimosso lo
+step `smoke-test-sync-prompts.mjs` e le relative asserzioni nello step "po
+CLI smoke test"; aggiunti `smoke-test-copy-prompts.mjs`,
+`smoke-test-custom-prompts.mjs` (tra i "Real e2e tests"), un'asserzione che
+`po init` non crea più `prompts/`, e un round-trip reale di `po copy-prompts`
+(prima copia pulita, poi backup di una personalizzazione) contro
+un'installazione globale reale.
+
+**Limite onesto invariato**: come già per la Revisione 46, cambiare i file
+su disco (con `po copy-prompts`) non cambia il comportamento di un'istanza
+GIÀ IN ESECUZIONE — va rilanciata perché `loadRolePrompt()` rilegga le
+istruzioni aggiornate.
+
+**Versione**: `1.2.5` → `1.2.6`.
+
+## Revisione 46 — nuovo `po sync-prompts`: chiude il vero motivo per cui il bug della Revisione 44 continuava a succedere su un progetto reale
+
+**Trigger reale**: subito dopo aver consegnato la Revisione 45, l'operatore ha
+condiviso uno screenshot del progetto reale "voice-agent" in herdr: la
+sidebar delle "spaces" mostra `voice-agent` con SOLO la tab `planner-01`,
+mentre la status bar di presenza MQTT in basso mostra `coder-02`,
+`docs-sync-02`, `frontend-developer-02`, `reviewer-02`, `a11y-tester-02`,
+`security-evaluator-02` tutti online — esattamente il sintomo descritto
+nella richiesta originale che aveva portato alla Revisione 44. Controllato
+`herdr config check` (un solo problema, innocuo — una chiave
+`theme.custom.background` sconosciuta, ignorata) e l'intero `config.toml`
+(nessuna sezione per-progetto/spazio al suo interno): nessuno dei due
+spiegava il sintomo.
+
+**La prova definitiva**, di nuovo dal reasoning REALE del planner di quel
+progetto (screenshot dell'operatore):
+
+```
+$ cd /Users/alessiobacin/Development/testCode/voice-agent && \
+EXT="/Users/alessiobacin/.pi/agent/git/github.com/alessiobacin/pi-mqtt-orchestrator/extensions/orchestrator.ts"; \
+for s in reviewer-02 a11y-tester-02; do tmux kill-session -t "$s" 2>/dev/null; done; \
+...
+for spec in "reviewer-02 reviewer" "a11y-tester-02 a11y-tester"; do set -- $spec; tmux new-session -d -s "$1" -c "$PWD" "pi -e $EXT --instance $1 --role $2"; ...; done
+```
+
+Il planner di QUESTO progetto reale sta ancora componendo **tmux** +
+`pi -e <path assoluto>` — esattamente il pattern pre-Revisione-44 che questo
+stesso repo ha corretto in `prompts/planner.md` settimane prima. La causa,
+una volta trovata, è ovvia con il senno di poi: `po init` copia `prompts/`
+dentro un progetto scaffoldato **una volta sola**
+(`.pi/extensions/multiAgentOrchestrator/prompts/`, vedi Revisione 37); `po
+update` (Revisione 34) aggiorna SOLO le due copie GLOBALI del pacchetto
+(npm + il clone di `pi extension install`) — nessun comando in questo
+progetto ha MAI ricopiato `prompts/` dentro un progetto già scaffoldato dopo
+la sua creazione. "voice-agent" era stato scaffoldato prima della Revisione
+44: il pacchetto globale sulla macchina dell'operatore è stato aggiornato
+regolarmente ad ogni consegna, ma la copia LOCALE di `prompts/planner.md`
+dentro quel progetto è rimasta ferma alla versione con cui era stata
+scritta — il planner continuava quindi a ragionare (correttamente, rispetto
+al SUO prompt) componendo il vecchio comando tmux. Gli agenti risultavano
+online su MQTT (la presence bar li mostra) perché il processo `pi` in sé
+si connette comunque al broker — semplicemente herdr non aveva mai creato
+un proprio pannello/tab per loro, dato che non erano mai stati lanciati
+tramite `herdr agent start`.
+
+**Nota a margine, per completezza**: il banner "config.toml has unknown
+keys; herdr config check" nello screenshot NON è una citazione letterale di
+una chiave/stringa dentro il file — è herdr che suggerisce il COMANDO da
+lanciare (`herdr config check`) per vedere il dettaglio del problema.
+Confusione comprensibile ma innocua, chiarita all'operatore.
+
+**Fix**: nuovo comando `po sync-prompts` (`scripts/sync-prompts.mjs`,
+esposto da `bin/po.mjs`) — ricopia `prompts/` dal pacchetto installato
+(quello da cui `po` sta girando ORA) dentro
+`.pi/extensions/multiAgentOrchestrator/prompts/` del progetto nella
+directory corrente, la stessa identica sorgente/destinazione già usata da
+`create-project.mjs` alla creazione, ma eseguibile in qualunque momento
+successivo. Non sovrascrive mai in silenzio: se esiste già una copia locale,
+viene rinominata in `prompts.bak-<timestamp>` (accanto a `prompts/`, stesso
+principio già seguito altrove in questo progetto — es. `worktree_finalize`
+non cancella mai un worktree in conflitto) prima di scrivere quella nuova,
+così un'eventuale personalizzazione manuale fatta su un prompt di uno
+specifico progetto resta recuperabile. `scripts/update.mjs` stampa ora, alla
+fine di un `po update` riuscito, un promemoria esplicito che ricorda questo
+gap e istruisce a lanciare `po sync-prompts` in ogni progetto esistente che
+si vuole allineare.
+
+**Limite onesto**: sincronizzare i file su disco non cambia il comportamento
+di un'istanza (planner o worker) GIÀ IN ESECUZIONE — il suo prompt di ruolo
+è già stato caricato in memoria da `loadRolePrompt()` all'avvio della
+sessione `pi` corrente (vedi `extensions/orchestrator.ts`). Va riavviata
+(rilanciata con `po start --instance <nome> --role <ruolo>`) perché legga
+davvero le istruzioni aggiornate — `po sync-prompts` stampa esplicitamente
+questo promemoria.
+
+**Verificato**: nuovo `scripts/smoke-test-sync-prompts.mjs` (9 asserzioni,
+spawna il vero `bin/po.mjs sync-prompts`) — copre il rifiuto fuori da un
+progetto scaffoldato, la sostituzione reale di un `planner.md` deliberatamente
+STALE col contenuto CORRENTE del pacchetto (compreso un file bespoke
+aggiunto in una revisione successiva, `frontend-developer.md` della
+Revisione 45, a riprova che la sincronizzazione prende tutto ciò che il
+pacchetto ha oggi, non solo i file già presenti), e il backup completo e
+recuperabile della copia precedente. Verificato anche a mano contro
+un'installazione globale reale (`npm install -g .` + `po init` + `po
+sync-prompts` in un progetto scaffoldato di prova) — compreso il percorso
+esatto del backup (`prompts.bak-<timestamp>`, SIBLING di `prompts/`, non al
+suo interno: un primo tentativo di asserzione CI con un percorso glob
+sbagliato lo aveva mascherato, corretto prima di consegnare). Aggiunto sia
+alla suite `smoke-test-*.mjs` sia, con un round-trip completo su
+un'installazione globale reale, allo step "po CLI smoke test" della CI.
+
+**Versione**: `1.2.4` → `1.2.5`.
+
 ## Revisione 45 — `frontend-developer` passa SEMPRE da reviewer, in un ciclo, prima del planner
 
 **Richiesta dell'operatore (testuale)**: "così come reviewer controlla in un

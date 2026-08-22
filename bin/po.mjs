@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // `po` — CLI unificata di pi-mqtt-orchestrator (Revisione 31, vedi
 // docs/development-notes.md). Sostituisce il vecchio binario a sé
-// `pi-orchestrator-init` con sei sottocomandi:
+// `pi-orchestrator-init` con questi sottocomandi:
 //
 //   po init [opzioni]    scaffolda l'estensione nella directory CORRENTE
 //                        (default — vedi `po init --help`), delega a
@@ -23,6 +23,15 @@
 //   po end [opzioni]     chiude i run "active" del layer ticket/DAG per il
 //                        progetto nella directory corrente (Revisione 38) —
 //                        delega a scripts/end-project.mjs (runEndProject()).
+//   po copy-prompts      copia prompts/ dal pacchetto installato dentro
+//                        <progetto>/.pi/extensions/multiAgentOrchestrator/prompts/,
+//                        per chi vuole personalizzarli per QUESTO progetto
+//                        (Revisione 47) — delega a scripts/copy-prompts.mjs
+//                        (runCopyPrompts()). Da solo non cambia nulla: serve
+//                        anche `po start ... --custom-prompts` per farli
+//                        usare davvero (default: i prompt si leggono sempre
+//                        dal pacchetto installato, mai da una copia locale
+//                        — vedi extensions/orchestrator.ts).
 //
 // Installazione: `npm install -g <repo>` (o `npm link` in locale, per lo
 // sviluppo di questo pacchetto stesso) espone `po` sul PATH — campo "bin" di
@@ -44,10 +53,7 @@ import { runDoctor } from "../scripts/doctor.mjs";
 import { runUpdate } from "../scripts/update.mjs";
 import { runUninstall } from "../scripts/uninstall.mjs";
 import { runEndProject } from "../scripts/end-project.mjs";
-import { runWatch } from "../scripts/watch-stalls.mjs";
-import { runPoStatus } from "../scripts/po-status.mjs";
-import { runPoDeps } from "../scripts/po-deps.mjs";
-import { runGantt } from "../scripts/gantt-server.mjs";
+import { runCopyPrompts } from "../scripts/copy-prompts.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -65,15 +71,7 @@ function printTopUsage() {
 			"  update [--check] Aggiorna l'installazione globale all'ultima versione della repo GitHub",
 			"  uninstall [--yes] Rimuove l'installazione globale",
 			'  end [opzioni]    Chiude i run "active" del progetto nella directory corrente — `po end --help`',
-			'  watch [opzioni]  Sorvegliatore zero-token degli stall ticket — `po watch --once --help`',
-			'  status           Stato run/ticket del progetto (SQLite) — read-only',
-			'  logs [instance]  Ultime righe del log JSONL di un\'istanza — read-only',
-			'  fleet            Lista agenti live dal broker (retained presence) — read-only',
-			'  mcp [role]       Server/ruoli MCP dichiarati — read-only',
-			'  skills [role]    Skill per ruolo/istanza dichiarate — read-only',
-			'  doctor --network Verifica raggiungibilità broker + git + pi — read-only',
-			'  deps [opzioni]    Capability-probe: credenziali .env + cli + auth presenti? (read-only)',
-			'  gantt [opzioni]   Vista gantt live web dell\'orchestrazione — `po gantt --open`',
+			"  copy-prompts     Copia prompts/ dal pacchetto installato nel progetto corrente, per personalizzarli",
 			"",
 			"  --version, -v    Stampa la versione del pacchetto installato",
 			"  --help, -h       Mostra questo messaggio",
@@ -106,24 +104,8 @@ async function main() {
 		return;
 	}
 	if (sub === "doctor") {
-		if (rest[0] === "--network") {
-			const { ok } = await runPoStatus({ cwd, argv: ["doctor", "--network"] });
-			process.exit(ok ? 0 : 1);
-		}
 		const { ok } = await runDoctor({ cwd });
 		process.exit(ok ? 0 : 1);
-	}
-	if (sub === "status" || sub === "logs" || sub === "fleet" || sub === "mcp" || sub === "skills") {
-		await runPoStatus({ cwd, argv: [sub, ...rest] });
-		return;
-	}
-	if (sub === "deps" || sub === "provision") {
-		const r = await runPoDeps({ cwd, argv: rest });
-		process.exit(r?.ok ? 0 : 1);
-	}
-	if (sub === "gantt" || sub === "web") {
-		await runGantt({ cwd, argv: rest, packageRoot });
-		return;
 	}
 	if (sub === "update") {
 		await runUpdate({ packageRoot, argv: rest });
@@ -137,8 +119,8 @@ async function main() {
 		await runEndProject({ cwd, argv: rest });
 		return;
 	}
-	if (sub === "watch") {
-		await runWatch({ cwd, argv: rest });
+	if (sub === "copy-prompts") {
+		runCopyPrompts({ packageRoot, cwd });
 		return;
 	}
 

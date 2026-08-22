@@ -58,6 +58,9 @@ jobs:
       - name: launch-planner any-role support (Revisione 44 — po start for coder/reviewer/specialists too)
         run: node scripts/smoke-test-launch-any-role.mjs
 
+      - name: po copy-prompts (Revisione 47 — materialize a per-project prompts/ copy to customize, superseding the old po sync-prompts)
+        run: node scripts/smoke-test-copy-prompts.mjs
+
       - name: Smoke tests (transport / pipeline / worktree / coordination / etc.)
         run: |
           node scripts/smoke-test.mjs
@@ -83,6 +86,7 @@ jobs:
           node --experimental-strip-types scripts/smoke-test-end-project.mjs
           node --experimental-strip-types scripts/smoke-test-agent-send-presence-warning.mjs
           node --experimental-strip-types scripts/smoke-test-instance-liveness.mjs
+          node --experimental-strip-types scripts/smoke-test-custom-prompts.mjs
           node --experimental-strip-types scripts/e2e-full-flow.mjs
 
       - name: po CLI smoke test (init in place + start --print-only, via a real global install)
@@ -97,7 +101,21 @@ jobs:
           # guaranteed to exist instead.
           test -f agents/roles.yaml
           test -f .pi/extensions/multiAgentOrchestrator/config/project.json
-          test -f .pi/extensions/multiAgentOrchestrator/prompts/planner.md
           test ! -e extensions/orchestrator.ts
+          # Revisione 47: `po init` no longer creates a local prompts/ copy at
+          # all — role prompts are always read from the global install by
+          # default (see extensions/orchestrator.ts, resolveGlobalPromptsDir()).
+          test ! -e .pi/extensions/multiAgentOrchestrator/prompts
           po start --instance planner-01 --print-only | grep -q -- "--role planner"
           po end | grep -q -- "niente da chiudere"
+          # Revisione 47: `po copy-prompts` materializes a local copy to
+          # customize, then `--custom-prompts` is what actually makes an
+          # instance read it (exercised for real in
+          # scripts/smoke-test-custom-prompts.mjs above) — here we just
+          # confirm the CLI round-trip against the real global `po` binary.
+          po copy-prompts | grep -q -- "copiati"
+          test -f .pi/extensions/multiAgentOrchestrator/prompts/planner.md
+          echo "CUSTOMIZED-CI-MARKER" > .pi/extensions/multiAgentOrchestrator/prompts/planner.md
+          po copy-prompts | grep -q -- "copia locale precedente"
+          grep -q -- "CUSTOMIZED-CI-MARKER" .pi/extensions/multiAgentOrchestrator/prompts.bak-*/planner.md
+          ! grep -q -- "CUSTOMIZED-CI-MARKER" .pi/extensions/multiAgentOrchestrator/prompts/planner.md

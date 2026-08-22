@@ -46,6 +46,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 // ESM-safe lazy require, used only inside SQLiteOrchestratorStorage's
 // constructor to resolve node:sqlite on first actual use (see the
@@ -461,6 +462,7 @@ interface CliFlags {
 	mqttPassword?: string;
 	configDir?: string;
 	promptsDir?: string;
+	customPrompts?: boolean;
 	color?: string;
 	name?: string;
 }
@@ -475,6 +477,7 @@ function readCliFlags(pi: ExtensionAPI): CliFlags {
 		mqttPassword: (pi.getFlag("mqtt-password") as string | undefined) || undefined,
 		configDir: (pi.getFlag("config-dir") as string | undefined) || undefined,
 		promptsDir: (pi.getFlag("prompts-dir") as string | undefined) || undefined,
+		customPrompts: !!pi.getFlag("custom-prompts"),
 		color: (pi.getFlag("color") as string | undefined) || undefined,
 		name: (pi.getFlag("name") as string | undefined) || undefined,
 	};
@@ -517,34 +520,62 @@ const DEFAULT_ROLE_PROMPTS: Record<string, string> = {
 		"4. Concludi il turno dopo aver inviato l'esito.",
 };
 
-// roleCfg is this role's entry from roles.yaml (if any) — used to fall back
-// to prompts/specialist.md (a generic, data-driven prompt) for any role that
-// has a `label`/`brief` in roles.yaml but no hand-written prompts/<role>.md
-// of its own. This is what lets the roster of specialist roles (security,
-// docker, TDD, k8s, docs-sync, etc. — see agents/roles.yaml) work out of the
-// box without a bespoke prompt file per role, while planner/coder/reviewer
-// (and any role someone DOES want to hand-tune) keep taking priority from
-// their own prompts/<role>.md when present.
-function loadRolePrompt(cwd: string, promptsDir: string, role: string, roleCfg?: RoleConfig): string {
-	const dir = path.isAbsolute(promptsDir) ? promptsDir : path.join(cwd, promptsDir);
-	const file = path.join(dir, `${role}.md`);
+// Revisione 47: THE running copy of extensions/orchestrator.ts (wherever
+// `pi` actually loaded it from — the global npm package, the separate clone
+// `pi extension install` maintains under ~/.pi/agent/git/..., or a local dev
+// checkout) always has its own prompts/ folder sitting right next to it.
+// import.meta.url resolves to THIS file's own real path regardless of which
+// of those it is, so this needs no configuration and can never point at the
+// wrong install — it's the fix for the actual bug behind Revisione 46 (a
+// project scaffolded before a later prompt fix shipped stayed silently stuck
+// on the OLD prompt forever, because `po update` only refreshed the global
+// install, never a per-project copy). `po sync-prompts` (Revisione 46) is
+// gone: there is no per-project copy to fall behind any more by default.
+function resolveGlobalPromptsDir(): string {
+	const thisFile = fileURLToPath(import.meta.url); // .../pi-mqtt-orchestrator/extensions/orchestrator.ts
+	return path.join(path.dirname(thisFile), "..", "prompts");
+}
+
+function readRolePromptFile(dir: string, name: string): string | null {
+	const file = path.join(dir, `${name}.md`);
 	try {
 		if (fs.existsSync(file)) return fs.readFileSync(file, "utf-8");
 	} catch {
 		// fall through
 	}
+	return null;
+}
+
+const BUILTIN_SPECIALIST_PROMPT =
+	"Sei un agente specialista di ruolo {{ROLE}} ({{ROLE_LABEL}}), istanza {{INSTANCE}} nel progetto {{PROJECT}} (team: {{TEAM}}).\n" +
+	"La tua missione specifica in questo ruolo: {{BRIEF}}\n" +
+	"Lavora sempre dentro worktree_path (mai nella directory principale del progetto — usa worktree_create con lo slug indicato se manca). Usa report_append (non il tool generico di scrittura file) per aggiungere una sezione \"## Round N — {{ROLE}}\" al report, e file_claim/file_release prima di modificare un file che altri agenti dello stesso team potrebbero toccare in parallelo. Quando hai finito rispondi con agent_send a chi ti ha coinvolto (o a target_role: \"coder\" se hai trovato un problema che richiede una modifica al codice). Non chiamare mai worktree_finalize: lo fa solo il planner a fine ciclo.";
+
+// primaryDir is consulted FIRST, file by file (<role>.md, then specialist.md
+// if roleCfg has a brief) — fallbackDir (pass null to skip it entirely) is
+// consulted only for whichever specific file primaryDir doesn't have. This
+// is what makes --custom-prompts safe to turn on for just ONE role: any
+// other role's file simply isn't in the project's custom prompts folder, so
+// it transparently keeps reading the installed package's own (always
+// current) version instead of silently freezing on whatever `po
+// copy-prompts` happened to copy that one time — the exact staleness this
+// revision exists to close, but now impossible even for a customized
+// project, not just the (new) default of no local copy at all.
+function loadRolePrompt(primaryDir: string, fallbackDir: string | null, role: string, roleCfg?: RoleConfig): string {
+	const fromPrimary = readRolePromptFile(primaryDir, role);
+	if (fromPrimary !== null) return fromPrimary;
+	if (fallbackDir) {
+		const fromFallback = readRolePromptFile(fallbackDir, role);
+		if (fromFallback !== null) return fromFallback;
+	}
 	if (roleCfg?.brief) {
-		const specialistFile = path.join(dir, "specialist.md");
-		try {
-			if (fs.existsSync(specialistFile)) return fs.readFileSync(specialistFile, "utf-8");
-		} catch {
-			// fall through to the built-in specialist default below
+		const specialistFromPrimary = readRolePromptFile(primaryDir, "specialist");
+		if (specialistFromPrimary !== null) return specialistFromPrimary;
+		if (fallbackDir) {
+			const specialistFromFallback = readRolePromptFile(fallbackDir, "specialist");
+			if (specialistFromFallback !== null) return specialistFromFallback;
 		}
-		return (
-			"Sei un agente specialista di ruolo {{ROLE}} ({{ROLE_LABEL}}), istanza {{INSTANCE}} nel progetto {{PROJECT}} (team: {{TEAM}}).\n" +
-			"La tua missione specifica in questo ruolo: {{BRIEF}}\n" +
-			"Lavora sempre dentro worktree_path (mai nella directory principale del progetto — usa worktree_create con lo slug indicato se manca). Usa report_append (non il tool generico di scrittura file) per aggiungere una sezione \"## Round N — {{ROLE}}\" al report, e file_claim/file_release prima di modificare un file che altri agenti dello stesso team potrebbero toccare in parallelo. Quando hai finito rispondi con agent_send a chi ti ha coinvolto (o a target_role: \"coder\" se hai trovato un problema che richiede una modifica al codice). Non chiamare mai worktree_finalize: lo fa solo il planner a fine ciclo."
-		);
+		return BUILTIN_SPECIALIST_PROMPT;
 	}
 	return DEFAULT_ROLE_PROMPTS[role] || `Sei l'agente ${role}, istanza {{INSTANCE}} nel progetto {{PROJECT}}. Usa agent_list/agent_send/agent_get/agent_await per collaborare con gli altri agenti.`;
 }
@@ -1482,7 +1513,26 @@ export default function (pi: ExtensionAPI) {
 	pi.registerFlag("mqtt-username", { description: "MQTT username, if the broker requires auth", type: "string", default: undefined });
 	pi.registerFlag("mqtt-password", { description: "MQTT password, if the broker requires auth", type: "string", default: undefined });
 	pi.registerFlag("config-dir", { description: "Directory containing agents.yaml/roles.yaml", type: "string", default: "agents" });
-	pi.registerFlag("prompts-dir", { description: "Directory containing <role>.md role-behavior prompts", type: "string", default: "prompts" });
+	pi.registerFlag("prompts-dir", {
+		description:
+			"Directory containing this PROJECT's own custom <role>.md prompts (only consulted when --custom-prompts is " +
+			"also passed — see that flag). Defaults to .pi/extensions/multiAgentOrchestrator/prompts, the same place " +
+			"`po copy-prompts` writes to.",
+		type: "string",
+		default: undefined,
+	});
+	pi.registerFlag("custom-prompts", {
+		description:
+			"Revisione 47: by default, role prompts are ALWAYS read from the currently-installed package's own " +
+			"prompts/ folder (next to this extension file) — never from a per-project copy — so a `po update` " +
+			"takes effect immediately for every project, with nothing to resync. Pass this flag to instead load " +
+			"THIS project's own customized prompts (see `po copy-prompts`) from --prompts-dir (or its default, " +
+			"<project>/.pi/extensions/multiAgentOrchestrator/prompts). Missing a specific <role>.md there — or the " +
+			"whole directory not existing at all (e.g. `po copy-prompts` was never run) — falls back automatically " +
+			"to the installed package's own prompt for that role, file by file, never a hard error.",
+		type: "boolean",
+		default: false,
+	});
 	pi.registerFlag("name", {
 		description:
 			"Display name for this agent's terminal pane/tab (used by multiplexers like herdr, via the terminal title). " +
@@ -2085,14 +2135,27 @@ export default function (pi: ExtensionAPI) {
 		const flags = readCliFlags(pi);
 		const cfg = loadConfig(identity.cwd, flags.configDir || "agents");
 		const roleCfg = cfg.roles[identity.role];
-		// Default spostato in Revisione 37 da "prompts" (root del progetto,
-		// tracciato da git) a .pi/extensions/multiAgentOrchestrator/prompts
-		// (gitignored) — vedi moaSubdirs più sopra per il perché. --prompts-dir
-		// resta un override esplicito e completo: chi lo passa si aspetta
-		// esattamente quel percorso (relativo a cwd, o assoluto), non una
-		// sotto-cartella di .pi/.
-		const defaultPromptsDir = path.join(".pi", "extensions", "multiAgentOrchestrator", "prompts");
-		const template = loadRolePrompt(identity.cwd, flags.promptsDir || defaultPromptsDir, identity.role, roleCfg);
+		// Revisione 47: per default i prompt vengono SEMPRE letti dalla cartella
+		// prompts/ del pacchetto installato (resolveGlobalPromptsDir(), risolta
+		// dalla posizione reale di QUESTO file, mai da un percorso ipotizzato) —
+		// mai da una copia locale del progetto, che prima (Revisione 37-46)
+		// restava silenziosamente indietro ad ogni `po update`. Solo
+		// --custom-prompts fa eccezione: guarda PRIMA nella cartella locale del
+		// progetto (--prompts-dir, default .pi/extensions/multiAgentOrchestrator/prompts,
+		// creata da `po copy-prompts`), poi ricade sul pacchetto installato per
+		// qualunque file quella cartella non abbia — file per file, non tutto o
+		// niente: personalizzare un solo ruolo non fa "congelare" gli altri.
+		const globalPromptsDir = resolveGlobalPromptsDir();
+		const localPromptsDirRaw = flags.promptsDir || path.join(".pi", "extensions", "multiAgentOrchestrator", "prompts");
+		const localPromptsDir = path.isAbsolute(localPromptsDirRaw) ? localPromptsDirRaw : path.join(identity.cwd, localPromptsDirRaw);
+		const primaryDir = flags.customPrompts ? localPromptsDir : globalPromptsDir;
+		const fallbackDir = flags.customPrompts ? globalPromptsDir : null;
+		const template = loadRolePrompt(primaryDir, fallbackDir, identity.role, roleCfg);
+		logEvent("role_prompt_resolved", {
+			custom_prompts: !!flags.customPrompts,
+			primary_dir: primaryDir,
+			fallback_dir: fallbackDir,
+		});
 		const systemPrompt = template
 			.replaceAll("{{INSTANCE}}", identity.instance)
 			.replaceAll("{{ROLE}}", identity.role)

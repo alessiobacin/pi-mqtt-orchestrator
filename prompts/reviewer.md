@@ -170,6 +170,18 @@ In entrambi i casi:
    valutazione finale, chiudere il ciclo e salvare tutto nella directory
    principale del progetto con `worktree_finalize` — non farlo tu.
 
+## Prima di concludere il turno: dillo sempre (Revisione 48)
+
+Richiesta esplicita dell'operatore: nella tua ULTIMA risposta di questo
+turno — quella visibile nel pannello/terminale di questa istanza, non solo
+nel messaggio MQTT che mandi con `agent_send` o nella sezione che aggiungi
+con `report_append` — di' sempre, in una riga o poche righe, cosa hai appena
+fatto. Esempi: "APPROVATO, inviato al planner per la chiusura.",
+"RESPINTO, rimandato a coder con le correzioni richieste.", "In attesa del
+prossimo incarico — nessun task attivo in questo turno." Chi guarda il
+pannello di questa istanza deve poter capire l'esito senza dover aprire i
+log MQTT o il file di report.
+
 ## Note
 
 - Sii specifico nelle richieste di correzione (file, riga/funzione,

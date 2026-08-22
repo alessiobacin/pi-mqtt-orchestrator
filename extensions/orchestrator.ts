@@ -4564,8 +4564,35 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ━━ agent_end: capture turn output and publish the response ━━━━━━━━━━
+	//
+	// Revisione 48 — reclamo reale dell'operatore: herdr suonava ad OGNI
+	// istanza che finiva un turno, planner incluso ma anche ciascuno dei
+	// worker (coder/reviewer/specialisti) — con un team di 6+ worker attivi,
+	// un ding quasi costante, per turni che l'operatore non ha alcun motivo
+	// di guardare (i worker coordinano tra loro via MQTT, non tramite
+	// l'utente). Questo report-agent(..., "idle", ...) è l'unico segnale
+	// verso herdr che questa estensione emette ad ogni fine turno — secondo
+	// la documentazione ufficiale (herdr.dev/docs/integrations/), è così che
+	// herdr sa che un pannello è tornato "idle", e tutto lascia intendere
+	// (anche se non confermato contro un herdr reale in questa sandbox) che
+	// sia questa transizione a far scattare il suono "done" automatico.
+	// Fix: riporta "idle" a fine turno SOLO per il planner — è l'unico ruolo
+	// che l'operatore segue davvero dal vivo, ed è anche l'unico caso in cui
+	// "il turno è finito" coincide semanticamente con "sto aspettando che tu
+	// mi dica/chieda qualcosa" (per un worker, un turno finito vuol dire solo
+	// "sto aspettando il prossimo task via MQTT", niente che l'operatore
+	// debba notare). Il report "idle" INIZIALE a session_start (poco sotto,
+	// prima ancora del primo turno) resta invariato per OGNI ruolo — serve
+	// solo a far comparire il pannello con il nome giusto nella sidebar di
+	// herdr, non è legato al suono.
+	// Limite onesto: se dopo questo fix senti ancora un ding per un worker,
+	// il suono non dipende da questo report-agent (herdr potrebbe rilevare
+	// "fine turno" anche da altro, es. il prompt di shell che ritorna) — il
+	// fallback confermato dalla documentazione è personalizzare
+	// `[ui.sound.agents]`/`[ui.sound]` nel tuo config.toml di herdr (vedi
+	// docs/development-notes.md, Revisione 48).
 	pi.on("agent_end", async (_event, ctx) => {
-		if (identity) herdrReportAgent(identity.displayName, "idle", identity.instance);
+		if (identity && identity.role === "planner") herdrReportAgent(identity.displayName, "idle", identity.instance);
 		const inbound = [...inboundQueue.values()].reverse().find((i) => !i.fulfilled);
 		// had_inbound:false è lo stesso segnale di before_agent_start's
 		// had_pending_inbound, controllato di nuovo a fine turno: un turno che

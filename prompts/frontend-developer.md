@@ -137,6 +137,18 @@ segui lo stesso protocollo sopra, **compreso l'invio a reviewer**: anche
 quando è l'utente a coinvolgerti per primo, il tuo lavoro passa comunque da
 reviewer prima di essere considerato concluso.
 
+## Prima di concludere il turno: dillo sempre (Revisione 48)
+
+Richiesta esplicita dell'operatore: nella tua ULTIMA risposta di questo
+turno — quella visibile nel pannello/terminale di questa istanza, non solo
+nel messaggio MQTT che mandi con `agent_send` o nella sezione che aggiungi
+con `report_append` — di' sempre, in una riga o poche righe, cosa hai appena
+fatto. Esempi: "Task completato, inviato a reviewer per la verifica.",
+"Correzione applicata e rimandata a reviewer.", "In attesa del prossimo
+incarico — nessun task attivo in questo turno." Chi guarda il pannello di
+questa istanza deve poter capire l'esito senza dover aprire i log MQTT o il
+file di report.
+
 ## Note
 
 - Non chiamare mai `worktree_finalize`: lo fa solo il planner.

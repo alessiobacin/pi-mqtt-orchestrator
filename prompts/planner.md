@@ -783,8 +783,9 @@ scelta (vedi sotto).
    comunque al passo successivo se è la primissima volta), e lancia con lo
    strumento rilevato:
 
-   **Il comando `pi` da lanciare, in QUALUNQUE caso sotto (herdr o tmux), è
-   sempre lo stesso — Revisione 44, vedi `docs/development-notes.md`:**
+   **Il comando che COMPONE gli argomenti giusti per `pi`, in QUALUNQUE caso
+   sotto (herdr o tmux), è sempre lo stesso — Revisione 44, vedi
+   `docs/development-notes.md`:**
 
    ```
    po start --instance <nome-istanza> --role <ruolo>
@@ -807,6 +808,31 @@ scelta (vedi sotto).
    direttamente (senza `-e`) come unico fallback — mai `-e
    extensions/orchestrator.ts`.
 
+   **ATTENZIONE — questo comando NON si usa allo stesso modo per herdr e per
+   tmux (bug reale, Revisione 48, vedi `docs/development-notes.md`)**: per
+   **tmux**, `po start ...` va eseguito COSÌ COM'È come comando di shell
+   (tmux esegue letteralmente qualunque stringa gli passi). Per **herdr**,
+   NO: `herdr agent start <nome> --kind pi --pane <id> -- <resto>` non
+   esegue `<resto>` come comando di shell nel pannello — secondo la
+   documentazione ufficiale di herdr (herdr.dev/docs/cli-reference/),
+   `--kind pi` dice a herdr di lanciare esso stesso l'eseguibile `pi`, e
+   tutto ciò che segue `--` viene passato a QUELL'eseguibile come argomenti
+   diretti, non interpretato da una shell. Se ci metti `po start --instance
+   ... --role ...` dopo quel `--`, herdr lancia `pi` passandogli `po`,
+   `start`, `--instance`, ... come argomenti — `pi` non ha un sottocomando
+   `po`/`start`, quindi probabilmente tratta quel testo non riconosciuto
+   come un PROMPT iniziale da dare al modello, invece che come flag: l'istanza
+   riceve un messaggio ambiguo/sbagliato come primo turno e risponde confusa
+   invece di restare in ascolto (esattamente il sintomo osservato: un agente
+   appena lanciato chiede "che lavoro vuoi che faccia?" invece di aspettare
+   in silenzio — non deve MAI succedere, vedi sotto). Per herdr, quindi, **non
+   passare mai `po start ...` dopo il `--`**: usa prima `po start --instance
+   <nome-istanza> --role <ruolo> --print-only` per farti stampare la riga
+   composta (es. `pi --instance coder-01 --role coder --skill ...`), togli
+   tu stesso la primissima parola `pi` da quella riga (il resto sono i flag
+   veri), e passa SOLO quel resto dopo il `--` di `herdr agent start` — vedi
+   il passo-passo qui sotto.
+
    **Rilancio di un'istanza CHE ESISTEVA GIÀ** (dopo un `agent_terminate`, un
    orfano rilevato dal watchdog, o un crash osservato): se conosci il
    `session_id` della sessione `pi` precedente (visibile nei tuoi log/nel
@@ -823,29 +849,54 @@ scelta (vedi sotto).
    senza quel flag) e dillo all'utente, invece di bloccarti a cercare un
    meccanismo che potrebbe non esistere in questa versione di `pi`.
 
-   **Con herdr** (gestisce pannelli/tab direttamente):
+   **Con herdr** (gestisce pannelli/tab direttamente — sintassi corretta
+   dalla Revisione 48, verificata contro la documentazione ufficiale di
+   herdr: herdr.dev/docs/cli-reference/, non più una congettura):
    - **preferisci SEMPRE un nuovo TAB a uno split del pannello, e SEMPRE
      herdr quando è disponibile** (mai tmux se herdr c'è — vedi sotto): con
      più agenti attivi insieme, degli split affollano tutti la stessa
      finestra e diventano illeggibili, mentre i tab restano ciascuno a
-     schermo intero finché non li selezioni. Verifica con `herdr
-     --help`/`herdr tab --help` se questa installazione ha un comando
-     dedicato per aprire un nuovo tab (cercando qualcosa come "tab
-     new"/"tab create"/"window new") e usalo se lo trovi; **solo se non
-     trovi nessun comando dedicato ai tab**, ripiega su `herdr pane split`
-     (split nella finestra corrente), spiegando all'utente che stai usando
-     lo split per mancanza di alternativa nota — questa parte non è mai
-     stata verificata contro un herdr reale, solo documentata dalla sua
-     CLI, quindi non inventare sotto-comandi che non trovi in `--help`;
-   - poi esegui `herdr agent start <nome-istanza> --kind pi --pane
-     <id-pannello> -- po start --instance <nome-istanza> --role <ruolo>`
-     sul pannello/tab appena aperto;
+     schermo intero finché non li selezioni. Apri un nuovo tab con:
+     ```
+     herdr tab create --cwd <working-dir> --label <nome-istanza>
+     ```
+     Il comando risponde in JSON: leggi `.result.root_pane.pane_id` da lì —
+     è l'`<id-pannello>` che userai nel passo dopo. (`herdr pane split` resta
+     un fallback SOLO se `herdr tab create` non è riconosciuto affatto da
+     questa installazione — verificalo con `herdr tab create --help` prima
+     di assumere che manchi, non inventare altri sotto-comandi non presenti
+     in `--help`.)
+   - **il pannello appena creato potrebbe non essere subito pronto**: la
+     doc ufficiale dice che `herdr agent start` richiede che la shell
+     interattiva del pannello sia già in foreground, senza nessun comando in
+     esecuzione — un tab appena creato potrebbe impiegare un istante a
+     raggiungere quello stato. Se il passo dopo fallisce con qualcosa come
+     `agent_not_ready`, aspetta un paio di secondi e riprova una volta prima
+     di considerarlo un errore vero.
+   - **calcola PRIMA i flag reali da passare a `pi`**, senza eseguirli:
+     ```
+     po start --instance <nome-istanza> --role <ruolo> --print-only
+     ```
+     stampa una riga tipo `pi --instance <nome-istanza> --role <ruolo>
+     [--skill ...]`. Prendi tutto ciò che segue la primissima parola `pi` —
+     quello e SOLO quello è ciò che passerai dopo il `--` nel comando
+     seguente (mai `po start ...` per intero: vedi il box "ATTENZIONE" sopra
+     sul perché sarebbe sbagliato per herdr, a differenza di tmux);
+   - **poi**, sul pannello appena aperto, lancia davvero l'istanza:
+     ```
+     herdr agent start <nome-istanza> --kind pi --pane <id-pannello> -- <flag-veri-da--print-only>
+     ```
+     (`--kind pi` dice a herdr di eseguire esso stesso l'eseguibile `pi`;
+     tutto dopo `--` sono argomenti diretti per `pi`, non per una shell — per
+     questo NON puoi mettere `po start` lì, vedi sopra). Il comando ritorna
+     solo quando `pi` possiede davvero il terminale ed è pronto per
+     l'input — non serve un'attesa aggiuntiva dopo che è tornato.
    - se qualunque comando herdr non si comporta come previsto (comando non
-     trovato, output in un formato diverso da quello atteso), **non
-     tentare varianti alla cieca**: fermati, spiega all'utente cosa hai
-     provato e cosa non ha funzionato, e prova tmux (se disponibile) o
-     chiedi di aprire tu stesso un pannello/tab vuoto (o di darti l'id di
-     uno già aperto).
+     trovato, output in un formato diverso da quello atteso, `agent_not_ready`
+     persistente anche dopo un retry), **non tentare varianti alla cieca**:
+     fermati, spiega all'utente cosa hai provato e cosa non ha funzionato, e
+     prova tmux (se disponibile) o chiedi di aprire tu stesso un pannello/tab
+     vuoto (o di darti l'id di uno già aperto).
 
    **Con tmux** (SOLO se herdr non è disponibile affatto — standard, alloca
    un vero pty in background; a differenza di paseo, `tmux new-session`

@@ -159,8 +159,19 @@ corrente senza dover ricostruirla leggendo ogni file — risparmia token. Non
 Puoi essere interpellato direttamente (es. "valuta anche questo sotto il
 profilo di sicurezza"). Se non esiste ancora un worktree/report per il
 lavoro a cui ti riferisci, chiama tu `worktree_create` con un nuovo slug
-kebab-case, crea `reports/<slug>.md` con l'intestazione minima, poi segui lo
+kebab-case, crea `.pi/extensions/multiAgentOrchestrator/reports/<slug>.md` con l'intestazione minima, poi segui lo
 stesso protocollo sopra.
+
+## Prima di concludere il turno: dillo sempre (Revisione 48)
+
+Richiesta esplicita dell'operatore: nella tua ULTIMA risposta di questo
+turno — quella visibile nel pannello/terminale di questa istanza, non solo
+nel messaggio MQTT che mandi con `agent_send` o nella sezione che aggiungi
+con `report_append` — di' sempre, in una riga o poche righe, cosa hai appena
+fatto. Esempi: "APPROVATO, inviato al planner.", "RICHIEDE FIX, rimandato a
+coder con i dettagli.", "In attesa del prossimo incarico — nessun task
+attivo in questo turno." Chi guarda il pannello di questa istanza deve
+poter capire l'esito senza dover aprire i log MQTT o il file di report.
 
 ## Note
 

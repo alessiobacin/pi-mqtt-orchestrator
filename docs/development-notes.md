@@ -6,6 +6,135 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 48 — sintassi herdr corretta contro la doc ufficiale (bug reale: agente lanciato riceveva "pi" come messaggio ambiguo), ding scoperto solo al planner, disciplina di feedback a fine turno, diagramma sempre obbligatorio per docs-sync, bug reale nelle variabili WhatsApp
+
+**Trigger reale**: subito dopo la Revisione 47, l'operatore ha condiviso il
+reasoning REALE del planner di "voice-agent" mentre rilanciava l'intero team
+dopo un crash del server tmux — ancora componendo `tmux new-session ...
+"pi -e $EXT --instance $1 --role $2"`, lo stesso identico pattern che questo
+progetto pensava di aver già chiuso. Contemporaneamente ha segnalato che,
+appena il planner lancia un agente (con la sintassi herdr che questo
+prompt suggeriva), quell'istanza risponde SUBITO con qualcosa come *"Il
+messaggio 'pi' è troppo ambiguo per me..."* invece di restare in ascolto —
+un comportamento mai visto prima. Nella stessa richiesta, altri tre problemi
+distinti: nessun feedback testuale quando un agente chiude un round; herdr
+suona per OGNI istanza che finisce un turno, non solo il planner; le
+notifiche WhatsApp erano smesse di funzionare nonostante le variabili nel
+`.env`.
+
+**1) Bug reale nella sintassi herdr di `prompts/planner.md` (causa root
+dell'"ambiguo `pi`")**: questo prompt istruiva `herdr agent start <nome>
+--kind pi --pane <id> -- po start --instance <nome> --role <ruolo>`,
+assumendo (mai verificato contro un herdr reale né contro la sua
+documentazione ufficiale, onestamente segnalato come tale nel testo)
+che tutto dopo `--` venisse eseguito come comando di shell nel pannello,
+esattamente come fa `tmux new-session ... "<comando>"`. **Non è così**:
+verificato ora contro la documentazione ufficiale
+(herdr.dev/docs/cli-reference/), `--kind pi` dice a herdr di lanciare esso
+stesso l'eseguibile `pi`, e tutto ciò che segue `--` sono argomenti diretti
+per QUELL'eseguibile, mai interpretati da una shell. Passandogli `po start
+--instance ... --role ...`, herdr eseguiva `pi` con argomenti `po`, `start`,
+`--instance`, ... — `pi` non ha un sottocomando `po`/`start`, quindi con
+ogni probabilità trattava quel testo non riconosciuto come un PROMPT
+iniziale per il modello invece che come flag: l'istanza riceveva un primo
+messaggio ambiguo e rispondeva confusa invece di restare in ascolto — la
+causa esatta del secondo sintomo segnalato (non un problema separato).
+
+**Fix**: `prompts/planner.md` ora istruisce un flusso in due passi, verificato
+contro la doc ufficiale:
+1. `herdr tab create --cwd <dir> --label <nome>` per aprire un nuovo tab —
+   risposta JSON, `.result.root_pane.pane_id` è l'id pannello (prima si
+   suggeriva di "cercare un sottocomando tipo tab new/tab create" per
+   tentativi: ora è confermato e specifico).
+2. `po start --instance <nome> --role <ruolo> --print-only` per farsi
+   stampare la riga composta, togliere a mano la prima parola `pi`, e
+   passare SOLO il resto dopo il `--` di `herdr agent start ... -- <resto>`
+   — mai `po start` per intero, perché per herdr (a differenza di tmux) non
+   è un comando di shell.
+
+Il prompt spiega ora esplicitamente perché tmux e herdr si comportano in
+modo diverso con lo stesso comando `po start` (prima lasciava intendere
+fossero intercambiabili), per evitare che l'errore si ripresenti in una
+forma diversa in futuro.
+
+**2) Herdr suonava per OGNI istanza, non solo per il planner**: l'unico
+segnale che questa estensione manda a herdr ad ogni fine turno è
+`herdrReportAgent(label, "idle", instance)` (vedi
+`extensions/orchestrator.ts`, funzione omonima) — veniva chiamato
+incondizionatamente per QUALUNQUE ruolo in `agent_end`. Con un team di 6+
+worker attivi, un ding quasi costante per turni che l'operatore non ha
+motivo di guardare (i worker coordinano tra loro via MQTT, non tramite
+l'utente). **Fix**: quel report a fine turno ora scatta solo quando
+`identity.role === "planner"` — è l'unico ruolo che l'operatore segue dal
+vivo, ed è anche l'unico caso in cui "il turno è finito" coincide
+semanticamente con "sto aspettando che tu mi dica/chieda qualcosa". Il
+report "idle" iniziale a `session_start` resta invariato per ogni ruolo
+(serve solo a dare il nome giusto al pannello nella sidebar di herdr, non è
+legato al suono). **Limite onesto**: non è confermato contro un herdr reale
+che sia esattamente questa transizione a far scattare il suono (la sandbox
+di sviluppo non ha herdr installato) — è la spiegazione più plausibile e
+l'unico segnale che questa estensione controlla; se il ding persiste per i
+worker anche dopo questo fix, il fallback documentato da herdr stesso è
+personalizzare `[ui.sound.agents]`/`[ui.sound]` nel proprio `config.toml`
+di herdr (herdr.dev/docs/configuration/).
+
+**3) Nessun feedback testuale quando un agente chiude un round**: prima di
+questa revisione, un agente chiudeva il turno subito dopo aver chiamato
+`agent_send`/`report_append`, senza dire nulla di leggibile nella propria
+risposta finale (quella visibile nel pannello) — un operatore che guarda il
+pannello di un'istanza non aveva modo di sapere cosa fosse appena successo
+senza aprire i log MQTT o il file di report. **Fix**: nuova sezione "Prima
+di concludere il turno: dillo sempre" in `prompts/coder.md`,
+`prompts/reviewer.md`, `prompts/security-evaluator.md`,
+`prompts/frontend-developer.md`, `prompts/docs-sync.md` e
+`prompts/specialist.md` (quindi ogni ruolo tranne planner, che già parla
+costantemente con l'utente) — richiede una riga o poche righe nell'ULTIMA
+risposta del turno che dica in chiaro cosa è appena successo ("Task
+completato, inviato a reviewer.", "In attesa del prossimo incarico.", ecc.).
+
+**4) Diagramma di architettura/flusso non più opzionale per docs-sync**:
+richiesta esplicita dell'operatore — prima, `prompts/docs-sync.md` lasciava
+il diagramma (`.pi/extensions/multiAgentOrchestrator/diagrams/architecture.mmd`)
+a un fallback condizionale ("se architecture-diagrammer non è nel team,
+aggiornalo tu; se lo è, fidati che lo faccia lui") senza mai verificare che
+fosse stato aggiornato per davvero. **Fix**: il punto 3 del checklist di
+chiusura ora richiede che docs-sync VERIFICHI (non dia per scontato) che il
+file esista e rifletta lo stato reale del progetto prima di considerare
+concluso il proprio round — se architecture-diagrammer è nel team ma non
+l'ha aggiornato (o non esiste ancora), tocca comunque a docs-sync farlo,
+segnalandolo nel report. La riga "Diagramma" nel template `report_append`
+non accetta più "non applicabile" come valore.
+
+**5) Notifiche WhatsApp smesse di funzionare — bug reale trovato nel .env di
+un progetto reale ("voice-agent")**: i log reali di `planner-01`
+mostravano 30/30 tentativi di `whatsapp_notify` falliti, tutti con lo
+stesso identico dettaglio: `"non configurato — variabili mancanti nel
+.env: DESTINATION_PHONE_NUMBER"`. La causa: quella singola variabile,
+richiesta da `sendWhatsAppNotification()` insieme a `EVOLUTION_API_URL`/
+`EVOLUTION_API_KEY`/`EVOLUTION_INSTANCE_NAME`, non era mai stata aggiunta al
+`.env` di quel progetto (le altre tre c'erano). Aggiunta (vuota, da
+compilare — non è compito di questa estensione conoscere il numero di
+telefono dell'operatore) direttamente nel `.env` reale del progetto tramite
+il ponte verso il dispositivo dell'operatore. **Bug separato, trovato nello
+stesso giro**: il `.env.example` di QUESTO pacchetto aveva la chiave
+sbagliata, `EVOLUTION_INSTANCE` invece di `EVOLUTION_INSTANCE_NAME` (quella
+davvero letta dal codice) — chiunque avesse copiato `.env.example` per un
+nuovo progetto non avrebbe mai attivato le notifiche, in silenzio. Corretto
+in `.env.example` (con un commento che spiega il perché), e aggiunta la
+sezione Evolution API/WhatsApp — mancante del tutto — anche al
+`.env.example` proprio di "voice-agent".
+
+**Verificato**: `npm run check-syntax`, `npm run check-skill-isolation`,
+l'intera suite `smoke-test-*.mjs` (inclusi i test e2e reali contro
+`extensions/orchestrator.ts`) e `e2e-full-flow.mjs` — tutti verdi, nessuna
+regressione dall'`agent_end` hook modificato o dai nuovi contenuti dei
+prompt. Non esiste (ancora) un test automatico per la sintassi herdr in sé
+(richiederebbe un herdr reale in CI, non disponibile) — verificato invece
+per iscritto contro la documentazione ufficiale di herdr, con le URL esatte
+citate nel prompt stesso per chi vuole ricontrollare.
+
+**Versione**: `1.2.6` → `1.2.7`.
+
 ## Revisione 47 — `--custom-prompts` + `po copy-prompts`: i prompt di ruolo si leggono SEMPRE dal pacchetto globale per default, `po sync-prompts` eliminato
 
 **Richiesta esplicita dell'operatore**, subito dopo aver ricevuto la

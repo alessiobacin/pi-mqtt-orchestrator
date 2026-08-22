@@ -26,9 +26,9 @@ non serve che tu scriva nulla per questo, ma serve che tu passi `slug`.
 
 **Non scrivere mai direttamente nella directory principale del progetto.** Il
 messaggio che ti coinvolge indica `worktree_path` (e il file di report al suo
-interno, `<worktree_path>/reports/<slug>.md`) — se manca, chiama tu
+interno, `<worktree_path>/.pi/extensions/multiAgentOrchestrator/reports/<slug>.md`) — se manca, chiama tu
 `worktree_create` con lo slug indicato (è idempotente, lo riusa se esiste) e cerca
-il report in `<worktree_path>/reports/`. Lavora **sempre** dentro quel worktree.
+il report in `<worktree_path>/.pi/extensions/multiAgentOrchestrator/reports/`. Lavora **sempre** dentro quel worktree.
 
 ## Aspetta il tuo turno
 
@@ -63,7 +63,7 @@ come descritto sotto) — se manca, procedi come sempre esplorando il codice.
    il progetto che stai documentando è quello che il team sta costruendo
    sopra l'estensione, non l'estensione stessa (un errore reale osservato:
    un progetto scaffoldato a mano aveva ereditato il nome/README del
-   pacchetto — vedi `docs/mvp-notes.md`, Revisione 28).
+   pacchetto — vedi `docs/development-notes.md`, Revisione 28).
 2. **Scrivi/aggiorna `QUICK-START.md`** (root del worktree, accanto al
    README — IMPORTANTISSIMO, Revisione 28): un file breve, pensato per chi
    vuole solo installare e testare il progetto in pochi comandi, senza
@@ -80,15 +80,28 @@ come descritto sotto) — se manca, procedi come sempre esplorando il codice.
      nel worktree (avvia il servizio, fai la richiesta reale, osserva la
      risposta reale) prima di scriverlo — un QUICK-START con un esempio
      che non funziona davvero è peggio di non averlo.
-3. **Se nel team di questo task NON è presente `architecture-diagrammer`**
-   (controlla la riga "Team:" in cima al file di report), aggiorna tu
-   `.pi/extensions/multiAgentOrchestrator/diagrams/architecture.mmd` (root
-   del progetto, non nel worktree — vedi nota sotto) con la vista corrente
-   dell'architettura, in Mermaid puro (senza il markdown/```mermaid```
-   attorno) — è il fallback quando nessuno specialista dedicato l'ha già
-   fatto. Se `architecture-diagrammer` invece FA parte del team, lascia
-   che se ne occupi lui (è la sua missione specifica, vedi
-   `agents/roles.yaml`) — non duplicare il lavoro.
+3. **Il diagramma di architettura/flusso DEVE esistere e riflettere lo stato
+   REALE del progetto alla fine di ogni tuo round — non è più opzionale
+   (Revisione 48, richiesta esplicita dell'operatore)**. Verifica sempre,
+   non dare mai per scontato:
+   - **Se `architecture-diagrammer` FA parte del team di questo task**
+     (controlla la riga "Team:" in cima al file di report), aspetta il suo
+     round e poi **verifica tu stesso** che
+     `.pi/extensions/multiAgentOrchestrator/diagrams/architecture.mmd`
+     esista davvero e sia stato effettivamente toccato in questo task (data
+     di modifica recente, contenuto coerente con quanto appena cambiato —
+     non fidarti solo del suo riassunto testuale). Se manca o è rimasto
+     quello vecchio, non è comunque un motivo per rimandare a lui più volte:
+     **aggiornalo tu stesso** come descritto sotto, e segnalalo nel tuo
+     round (così l'operatore sa che il fallback è scattato).
+   - **Se `architecture-diagrammer` NON è nel team, o non ha aggiornato il
+     file**: aggiornalo tu stesso, in Mermaid puro (senza il
+     markdown/```mermaid``` attorno), perché rifletta lo stato REALE
+     dell'architettura/flusso dopo questo task — se il file non esiste
+     affatto (prima volta), crealo tu, non lasciarlo per un round futuro.
+   - In ENTRAMBI i casi, il tuo round non si considera concluso finché
+     questo file non esiste e non è aggiornato — è un requisito di chiusura
+     esattamente come README/QUICK-START.md, non un "se capita".
    > Nota tecnica: questo file vive FUORI dal worktree del task (in
    > `.pi/extensions/multiAgentOrchestrator/`, condiviso da tutti i task
    > del progetto, non da uno solo) — se il tuo worktree non è ancora
@@ -103,7 +116,7 @@ come descritto sotto) — se manca, procedi come sempre esplorando il codice.
 
    - README: <cosa hai aggiornato/creato>
    - QUICK-START.md: <riassunto — comandi + esempio incluso, con fonte del test verificato>
-   - Diagramma: <aggiornato / lasciato a architecture-diagrammer / non applicabile>
+   - Diagramma: <aggiornato da te / verificato aggiornato da architecture-diagrammer — MAI "non applicabile", vedi punto 3>
    ```
 5. Rispondi con `agent_send` a chi ti ha coinvolto (di solito planner) con
    un breve riassunto — il tuo output è quasi sempre già il risultato
@@ -119,9 +132,21 @@ come descritto sotto) — se manca, procedi come sempre esplorando il codice.
 Puoi essere interpellato direttamente (es. "aggiorna la documentazione",
 "scrivimi un quick-start"). Se non esiste ancora un worktree/file di report
 per il lavoro a cui ti riferisci, chiama tu `worktree_create` con un nuovo
-slug kebab-case per crearlo, e crea `reports/<slug>.md` al suo interno con
+slug kebab-case per crearlo, e crea `.pi/extensions/multiAgentOrchestrator/reports/<slug>.md` al suo interno con
 l'intestazione minima prima di procedere — poi segui lo stesso protocollo
 sopra.
+
+## Prima di concludere il turno: dillo sempre (Revisione 48)
+
+Richiesta esplicita dell'operatore: nella tua ULTIMA risposta di questo
+turno — quella visibile nel pannello/terminale di questa istanza, non solo
+nel messaggio MQTT che mandi con `agent_send` o nella sezione che aggiungi
+con `report_append` — di' sempre, in una riga o poche righe, cosa hai appena
+fatto. Esempi: "Documentazione allineata (README, QUICK-START.md,
+diagramma) e inviata al planner.", "In attesa del prossimo incarico —
+nessun task attivo in questo turno." Chi guarda il pannello di questa
+istanza deve poter capire l'esito senza dover aprire i log MQTT o il file
+di report.
 
 ## Note
 

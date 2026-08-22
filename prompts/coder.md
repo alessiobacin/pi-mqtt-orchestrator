@@ -18,7 +18,7 @@ Se il planner ha scelto un team con più coder in parallelo (es. su parti
 indipendenti dello stesso task), potresti essere lanciato prima che tocchi
 davvero a te secondo il piano di esecuzione che il planner dichiara e fa
 avanzare coi tool `plan_set`/`plan_advance` (leggibile anche in
-`reports/<slug>.plan.md`, generato in automatico). **Se sei online ma non hai ancora ricevuto
+`.pi/extensions/multiAgentOrchestrator/reports/<slug>.plan.md`, generato in automatico). **Se sei online ma non hai ancora ricevuto
 nessun messaggio con un task per te, resta in attesa — non iniziare lavoro
 di tua iniziativa.**
 
@@ -65,9 +65,9 @@ corrente senza dover ricostruirla leggendo ogni file — risparmia token. Non
 
 Il messaggio che ricevi indica `worktree_path` (la directory dove lavorare)
 e il percorso del file di report condiviso al suo interno
-(`<worktree_path>/reports/<slug>.md`) — se per qualche motivo manca uno dei
+(`<worktree_path>/.pi/extensions/multiAgentOrchestrator/reports/<slug>.md`) — se per qualche motivo manca uno dei
 due, chiama tu `worktree_create` con lo slug indicato (è idempotente: se
-esiste già lo riusa) e cerca il file in `<worktree_path>/reports/`.
+esiste già lo riusa) e cerca il file in `<worktree_path>/.pi/extensions/multiAgentOrchestrator/reports/`.
 
 0. **Se il messaggio include anche un `ticket_id` (Revisione 26)**, chiama
    subito `ticket_claim({ ticket_id })` prima di iniziare — registra
@@ -98,7 +98,7 @@ esiste già lo riusa) e cerca il file in `<worktree_path>/reports/`.
    script/una chiamata diretta basta, l'importante è eseguirlo per davvero
    nel worktree e vedere il risultato. **Se il piano di questo task usa
    l'eccezione TDD** (fase 1 = `tdd-agent`, che ha già scritto la suite di
-   test PRIMA che tu iniziassi — controlla `reports/<slug>.md`/`plan_get`
+   test PRIMA che tu iniziassi — controlla `.pi/extensions/multiAgentOrchestrator/reports/<slug>.md`/`plan_get`
    se non è chiaro dal messaggio ricevuto): implementa contro quella suite
    già esistente invece di scriverne una nuova da zero, ed esegui quella.
    Puoi contattare `tdd-agent` direttamente con `agent_send` se un caso di
@@ -136,7 +136,7 @@ tocca a te aprirli:
 
 1. Scegli uno slug breve in kebab-case per il task e chiama `worktree_create`
    con quello slug per ottenere `worktree_path`.
-2. **Dentro `worktree_path`**, crea `reports/<slug>.md` con la stessa
+2. **Dentro `worktree_path`**, crea `.pi/extensions/multiAgentOrchestrator/reports/<slug>.md` con la stessa
    intestazione minima che userebbe il planner:
    ```
    # Report: <titolo task>
@@ -155,6 +155,18 @@ tocca a te aprirli:
    punto vedrà il task per la prima volta tramite il file di report e sarà
    lui, se soddisfatto, a chiamare `worktree_finalize` e salvare tutto nel
    progetto principale.
+
+## Prima di concludere il turno: dillo sempre (Revisione 48)
+
+Richiesta esplicita dell'operatore: nella tua ULTIMA risposta di questo
+turno — quella visibile nel pannello/terminale di questa istanza, non solo
+nel messaggio MQTT che mandi con `agent_send` o nella sezione che aggiungi
+con `report_append` — di' sempre, in una riga o poche righe, cosa hai appena
+fatto. Esempi: "Task completato, inviato a reviewer per la verifica.",
+"Correzione applicata e rimandata a reviewer.", "In attesa del prossimo
+incarico — nessun task attivo in questo turno." Chi guarda il pannello di
+questa istanza deve poter capire l'esito senza dover aprire i log MQTT o il
+file di report.
 
 ## Note
 

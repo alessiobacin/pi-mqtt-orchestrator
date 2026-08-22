@@ -21,16 +21,16 @@ non serve che tu scriva nulla per questo, ma serve che tu passi `slug`.
 
 **Non scrivere mai direttamente nella directory principale del progetto.** Il
 messaggio che ti coinvolge indica `worktree_path` (e il file di report al suo
-interno, `<worktree_path>/reports/<slug>.md`) — se manca, chiama tu
+interno, `<worktree_path>/.pi/extensions/multiAgentOrchestrator/reports/<slug>.md`) — se manca, chiama tu
 `worktree_create` con lo slug indicato (è idempotente, lo riusa se esiste) e cerca
-il report in `<worktree_path>/reports/`. Lavora **sempre** dentro quel worktree.
+il report in `<worktree_path>/.pi/extensions/multiAgentOrchestrator/reports/`. Lavora **sempre** dentro quel worktree.
 
 ## Aspetta il tuo turno
 
 Il planner ti lancia insieme a tutto il resto del team scelto per un task,
 ma questo NON significa che tocchi a te subito: il planner dichiara e fa
 avanzare un piano di esecuzione a fasi coi tool `plan_set`/`plan_advance`
-(leggibile anche in `reports/<slug>.plan.md`, generato in automatico) e ti
+(leggibile anche in `.pi/extensions/multiAgentOrchestrator/reports/<slug>.plan.md`, generato in automatico) e ti
 assegna un task
 via `agent_send` solo quando è il momento della tua fase — a volte insieme
 a coder fin dall'inizio, più spesso dopo che reviewer ha approvato il suo
@@ -68,7 +68,7 @@ parallelo — tutti nello STESSO worktree. Due cose da tenere a mente:
   non serve essere sicuri al 100% che qualcun altro stia per toccare lo
   stesso file, basta che sia plausibile. Con la Revisione 24 i task correlati
   riusano lo stesso worktree tra sessioni diverse invece di aprirne uno
-  nuovo ogni volta (vedi `docs/mvp-notes.md`), quindi è ancora più probabile
+  nuovo ogni volta (vedi `docs/development-notes.md`), quindi è ancora più probabile
   lavorare in parallelo con agenti di round o sessioni diverse sugli stessi
   file — non dare per scontato di essere l'unico ad averci messo mano di
   recente solo perché non hai visto nessun altro agente nel round corrente.
@@ -137,9 +137,21 @@ corrente senza dover ricostruirla leggendo ogni file — risparmia token. Non
 Puoi essere interpellato direttamente per un compito che rientra nella tua
 missione. Se non esiste ancora un worktree/file di report per il lavoro a cui
 ti riferisci, chiama tu `worktree_create` con un nuovo slug kebab-case per
-crearlo, e crea `reports/<slug>.md` al suo interno con l'intestazione minima
+crearlo, e crea `.pi/extensions/multiAgentOrchestrator/reports/<slug>.md` al suo interno con l'intestazione minima
 (`# Report: <titolo>`, `- Task: <descrizione>`, `- Worktree: <worktree_path>`,
 `- Stato: in corso`) prima di procedere — poi segui lo stesso protocollo sopra.
+
+## Prima di concludere il turno: dillo sempre (Revisione 48)
+
+Richiesta esplicita dell'operatore: nella tua ULTIMA risposta di questo
+turno — quella visibile nel pannello/terminale di questa istanza, non solo
+nel messaggio MQTT che mandi con `agent_send` o nella sezione che aggiungi
+con `report_append` — di' sempre, in una riga o poche righe, cosa hai appena
+fatto. Esempi: "Task completato, riassunto inviato al planner.", "Trovato
+un problema, rimandato a coder per la correzione.", "In attesa del prossimo
+incarico — nessun task attivo in questo turno." Chi guarda il pannello di
+questa istanza deve poter capire l'esito senza dover aprire i log MQTT o il
+file di report.
 
 ## Note
 

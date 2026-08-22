@@ -55,6 +55,9 @@ jobs:
       - name: launch-planner legacy-scaffold handling (stale extensions/ never re-added to -e)
         run: node scripts/smoke-test-launch-planner-legacy.mjs
 
+      - name: launch-planner any-role support (Revisione 44 — po start for coder/reviewer/specialists too)
+        run: node scripts/smoke-test-launch-any-role.mjs
+
       - name: Smoke tests (transport / pipeline / worktree / coordination / etc.)
         run: |
           node scripts/smoke-test.mjs

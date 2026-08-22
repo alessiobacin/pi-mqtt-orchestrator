@@ -23,7 +23,7 @@ Everything communicates over a local MQTT broker, using role/instance identity a
 - **A mandatory closing checklist**: `worktree_finalize` refuses to merge until you declare the user actually confirmed the result, e2e tests ran (or don't apply), the version was bumped (or doesn't apply), *and* a docs-sync pass actually reconciled the project's own README/QUICK-START/architecture diagram with what shipped (or doesn't apply) — and now pushes to the remote automatically after a successful merge
 - **Phased execution plans** — the planner declares which roles work together and in what order, and the system enforces it
 - **WhatsApp notifications** (via Evolution API) when a task completes or needs your input, so you don't have to watch the terminal
-- **A global `po` CLI** (`po init`, `po start`, `po doctor`, `po update`, `po uninstall`, `po end`) for scaffolding, launching, verifying the environment, keeping new orchestrated projects up to date, and closing them out
+- **A global `po` CLI** (`po init`, `po start`, `po doctor`, `po update`, `po uninstall`, `po end`) for scaffolding, launching, verifying the environment, keeping new orchestrated projects up to date, and closing them out — `po start` now composes the right launch command for *any* role, not just planner, which is what the planner itself uses when it launches new team members over herdr/tmux
 - **Automatic per-project MQTT scoping** — two different projects never collide on a shared broker without you having to pass `--project` yourself
 - **Cross-platform** — macOS, Linux, and Windows
 
@@ -118,6 +118,8 @@ Other roles (coder, reviewer, and any specialist) are launched the same way, dir
 ```bash
 pi --instance coder-01 --role coder
 ```
+
+`po start` also works for any role now (`po start --instance coder-01 --role coder`), not just planner — it composes the exact same command, and is what the planner itself now uses when it launches new team members (see Features below).
 
 ## Configuration
 

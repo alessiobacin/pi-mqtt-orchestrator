@@ -6,6 +6,100 @@ l'equivalente diretto di `coms.ts`/`coms-net.ts` del repo
 `disler/pi-vs-claude-code`, ma su MQTT 5 e con il paradigma role/instance al
 posto della chat P2P piatta.
 
+## Revisione 44 — `po start`/`launch-planner.mjs` generalizzato a QUALUNQUE ruolo: chiude il vero bug dietro "il planner non riesce a rilanciare gli agenti su herdr"
+
+**Trigger reale**: l'operatore ha incollato il transcript di ragionamento di un
+planner reale (progetto "voice-agent") che tentava di rilanciare dei worker
+dopo un blocco — 4 turni, decine di migliaia di token, spesi a
+ridiagnosticare da zero un problema che questo repo aveva già risolto per il
+ruolo planner nella Revisione 33. Il planner ha lanciato `pi -e
+extensions/orchestrator.ts --instance <nome> --role <ruolo>` via `herdr agent
+start`, il processo `pi` è fallito immediatamente (quel file non esiste più
+in un progetto scaffoldato dopo la Revisione 33), il pannello/tab herdr è
+morto sul colpo, e il planner ha dovuto scoprire da solo — `which pi`, `pi
+--help`, `find` sull'intero filesystem, lettura di `~/.pi/agent/settings.json`
+— che l'estensione è caricata automaticamente e che `-e` non va mai passato.
+
+**Causa reale, non un'ipotesi**: `scripts/launch-planner.mjs` (quindi `po
+start`) risolve correttamente da anni se serve `-e extensions/orchestrator.ts`
+o no (Revisione 33/34/38) — ma SOLO per il ruolo planner. Per qualunque altro
+ruolo, lo script si rifiutava esplicitamente di procedere e rimandava
+l'operatore/il planner a comporre il comando A MANO con `pi -e
+extensions/orchestrator.ts --role <ruolo>` — un consiglio diventato stale
+esattamente dalla Revisione 33 in poi, MAI corretto in questo punto specifico.
+Il planner, seguendo `prompts/planner.md` (sezione "Selezione dinamica del
+team", mai passando da `po start`/`launch-planner.mjs` per gli altri ruoli),
+componeva quello stesso comando stale a mano, per ogni istanza coder/
+reviewer/specialista lanciata via herdr o tmux — riproducendo l'esatto
+traceback "Tool ... conflicts with ..." (o, peggio, un fallimento silenzioso
+del processo `pi` all'avvio) ogni singola volta.
+
+**Due domande dirette dell'operatore, risposta**: "quando planner lancia un
+nuovo agente, deve usarlo con `pi ...` o `po start ...`?" — d'ora in poi
+SEMPRE `po start --instance <nome> --role <ruolo>`, per qualunque ruolo, mai
+più `pi -e extensions/orchestrator.ts` composto a mano: è l'unico punto del
+codice che applica la logica di rilevamento `-e` già corretta, e adesso la
+applica a ogni ruolo, non solo planner.
+
+**Fix** (`scripts/launch-planner.mjs`): `parseArgs()` non forza più
+`--role planner` — accetta qualunque ruolo, default `"planner"` se omesso
+(compatibilità piena con l'uso storico di `po start --instance planner-01`
+senza `--role`). I 5 flag `--skill` mattpocock restano attaccati **solo**
+quando il ruolo risolto è `"planner"` — mai per un altro ruolo, stessa
+garanzia di prima, verificata dallo stesso `scripts/check-skill-isolation.mjs`
+(il cui controllo 5 è stato riscritto per verificare l'accettazione invece
+del rifiuto). La logica di rilevamento `-e extensions/orchestrator.ts`
+(hasLocalExtension && looksLikePackageRepo, Revisione 33/38) è invariata e
+ora si applica identica a qualunque ruolo. `scripts/create-project.mjs`
+(messaggio stampato da `po init`) e `prompts/planner.md` (sezione di lancio
+team, herdr E tmux) aggiornati per usare sempre `po start --instance <nome>
+--role <ruolo>` invece del vecchio `pi -e extensions/orchestrator.ts ...`.
+
+**Seconda richiesta dell'operatore — rilancio per session id** (`po start
+--instance planner-01 --session <id>`): `launch-planner.mjs` inoltra già
+qualunque flag non riconosciuto direttamente a `pi` (nulla nel parser lo
+intercetta) — verificato con un test dedicato che `--session <id>` (o
+qualunque altro flag) attraversa `po start` inalterato fino al comando `pi`
+composto. **Limite onesto, dichiarato esplicitamente sia nel codice sia in
+`prompts/planner.md`**: se `pi` riconosca davvero un flag `--session`/
+`--resume`/`--continue` per riprendere una sessione precedente per id NON è
+mai stato verificato contro un binario `pi` reale in questo progetto — il
+passthrough generico funziona già oggi (è meccanico, non specifico a
+`--session`), ma se quel flag faccia davvero qualcosa di utile in `pi`
+dipende dalla CLI di `pi` stessa, fuori dal controllo di questo pacchetto.
+`prompts/planner.md` istruisce ora il planner a controllare `pi --help`
+PRIMA di usarlo, esattamente come già fa per `herdr pane split`/i
+sotto-comandi tab di herdr — mai inventare la sintassi, mai bloccarsi se non
+la trova: rilanciare una sessione nuova va sempre bene come fallback.
+
+**Terza osservazione dell'operatore — "voglio un nuovo tab di herdr non
+tmux"**: la preferenza herdr-su-tmux (e tab-su-split) era già la regola
+scritta in `prompts/planner.md` prima di questa revisione — resa più
+esplicita qui ("SEMPRE herdr quando è disponibile, mai tmux se herdr c'è").
+Il tmux menzionato nel transcript del planner era quasi certamente
+terminologia informale per descrivere i pannelli herdr stessi (probabilmente
+implementati sopra tmux), non un fallback effettivamente scelto al posto di
+herdr — non c'è evidenza nel transcript che il planner abbia usato comandi
+tmux diretti invece di `herdr agent start`. La causa reale del fallimento
+era il comando `pi` composto, non lo strumento di terminal multiplexing
+scelto.
+
+**Verificato**: nuovo `scripts/smoke-test-launch-any-role.mjs` (11
+asserzioni) — spawna il vero `scripts/launch-planner.mjs` come child process
+(mai un mirror): `--role coder`/`--role reviewer` compongono correttamente
+SENZA alcun flag `--skill`; `--role` omesso resta compatibile all'indietro
+(planner + skill, invariato); un flag ignoto come `--session <id>` attraversa
+inalterato; `--role` senza alcun valore viene rifiutato con un errore
+chiaro. `scripts/check-skill-isolation.mjs` controllo 5 riscritto per
+verificare l'accettazione di un ruolo diverso da planner (non più il
+rifiuto). Suite completa (21 smoke test + `e2e-full-flow.mjs` +
+`check-syntax`/`check-skill-isolation`) verde, più smoke test manuale della
+CLI `po` (`npm install -g .`, `po init --force`, `po start --instance
+coder-01 --role coder --print-only`, `po start --instance planner-01
+--print-only`).
+
+**Versione**: bump a `1.2.3`, da `1.2.2` (Revisione 43).
+
 ## Revisione 43 — la procedura di chiusura obbligatoria (Revisione 42) guadagna un quarto passaggio: docs-sync
 
 **Richiesta esplicita dell'operatore**, subito dopo aver ricevuto e testato la

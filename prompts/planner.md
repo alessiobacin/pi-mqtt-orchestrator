@@ -783,22 +783,63 @@ scelta (vedi sotto).
    comunque al passo successivo se è la primissima volta), e lancia con lo
    strumento rilevato:
 
+   **Il comando `pi` da lanciare, in QUALUNQUE caso sotto (herdr o tmux), è
+   sempre lo stesso — Revisione 44, vedi `docs/development-notes.md`:**
+
+   ```
+   po start --instance <nome-istanza> --role <ruolo>
+   ```
+
+   **Mai** `pi -e extensions/orchestrator.ts --instance <nome-istanza> --role
+   <ruolo>` a mano: questo era il comando corretto solo fino alla Revisione
+   33, e da allora un progetto scaffoldato non ha più una copia locale di
+   `extensions/orchestrator.ts` — quel file semplicemente non esiste più qui,
+   `pi -e` fallisce SUBITO all'avvio, e il pannello herdr/la sessione tmux
+   muore nello stesso istante in cui la apri (esattamente l'incidente
+   osservato: tab che sembrano aprirsi e sparire subito, "planner non riesce
+   a rilanciare gli agenti"). `po start` (installato globalmente insieme
+   all'estensione) risolve da solo se serve `-e` o no — usalo sempre, per
+   QUALUNQUE ruolo, non solo planner: attacca le skill vendorizzate
+   mattpocock automaticamente SOLO quando `--role` è `planner` (o omesso),
+   mai per coder/reviewer/specialisti. Se `po` non è nel PATH di quel
+   terminale (raro, ma verificalo con `which po`/`where po` prima di
+   incolpare altro), usa `pi --instance <nome-istanza> --role <ruolo>`
+   direttamente (senza `-e`) come unico fallback — mai `-e
+   extensions/orchestrator.ts`.
+
+   **Rilancio di un'istanza CHE ESISTEVA GIÀ** (dopo un `agent_terminate`, un
+   orfano rilevato dal watchdog, o un crash osservato): se conosci il
+   `session_id` della sessione `pi` precedente (visibile nei tuoi log/nel
+   report, o chiesto all'utente), **verifica PRIMA con `pi --help` se questa
+   installazione espone davvero un flag di ripresa sessione** (cerca
+   qualcosa come `--session`/`--resume`/`--continue` nell'help) — non è mai
+   stato verificato contro un `pi` reale in questo progetto, quindi non
+   darlo per scontato. Se lo trovi, puoi passarlo in coda al comando sopra
+   (`po start`/`pi` inoltrano qualunque flag non riconosciuto direttamente a
+   `pi`, incluso questo): `po start --instance <nome-istanza> --role
+   <ruolo> --session <id-sessione>`. Se `--help` non mostra nulla del
+   genere, o il comando si comporta in modo inatteso, **non inventare la
+   sintassi**: rilancia semplicemente una sessione nuova (stesso comando,
+   senza quel flag) e dillo all'utente, invece di bloccarti a cercare un
+   meccanismo che potrebbe non esistere in questa versione di `pi`.
+
    **Con herdr** (gestisce pannelli/tab direttamente):
-   - **preferisci un nuovo TAB a uno split del pannello**: con più agenti
-     attivi insieme, degli split affollano tutti la stessa finestra e
-     diventano illeggibili, mentre i tab restano ciascuno a schermo intero
-     finché non li selezioni. Verifica con `herdr --help`/`herdr tab --help`
-     se questa installazione ha un comando dedicato per aprire un nuovo tab
-     (cercando qualcosa come "tab new"/"tab create"/"window new") e usalo se
-     lo trovi; **solo se non trovi nessun comando dedicato ai tab**, ripiega
-     su `herdr pane split` (split nella finestra corrente), spiegando
-     all'utente che stai usando lo split per mancanza di alternativa nota —
-     questa parte non è mai stata verificata contro un herdr reale, solo
-     documentata dalla sua CLI, quindi non inventare sotto-comandi che non
-     trovi in `--help`;
+   - **preferisci SEMPRE un nuovo TAB a uno split del pannello, e SEMPRE
+     herdr quando è disponibile** (mai tmux se herdr c'è — vedi sotto): con
+     più agenti attivi insieme, degli split affollano tutti la stessa
+     finestra e diventano illeggibili, mentre i tab restano ciascuno a
+     schermo intero finché non li selezioni. Verifica con `herdr
+     --help`/`herdr tab --help` se questa installazione ha un comando
+     dedicato per aprire un nuovo tab (cercando qualcosa come "tab
+     new"/"tab create"/"window new") e usalo se lo trovi; **solo se non
+     trovi nessun comando dedicato ai tab**, ripiega su `herdr pane split`
+     (split nella finestra corrente), spiegando all'utente che stai usando
+     lo split per mancanza di alternativa nota — questa parte non è mai
+     stata verificata contro un herdr reale, solo documentata dalla sua
+     CLI, quindi non inventare sotto-comandi che non trovi in `--help`;
    - poi esegui `herdr agent start <nome-istanza> --kind pi --pane
-     <id-pannello> -- -e extensions/orchestrator.ts --instance <nome-istanza>
-     --role <ruolo>` sul pannello/tab appena aperto;
+     <id-pannello> -- po start --instance <nome-istanza> --role <ruolo>`
+     sul pannello/tab appena aperto;
    - se qualunque comando herdr non si comporta come previsto (comando non
      trovato, output in un formato diverso da quello atteso), **non
      tentare varianti alla cieca**: fermati, spiega all'utente cosa hai
@@ -806,18 +847,18 @@ scelta (vedi sotto).
      chiedi di aprire tu stesso un pannello/tab vuoto (o di darti l'id di
      uno già aperto).
 
-   **Con tmux** (standard, alloca un vero pty in background — a differenza
-   di paseo, `tmux new-session` esegue letteralmente il comando che gli
-   passi, non lo tratta come prompt): dalla directory del progetto, esegui
-   `tmux new-session -d -s <nome-istanza> -c <working-dir> "pi -e
-   extensions/orchestrator.ts --instance <nome-istanza> --role <ruolo>"`
-   (`-d` = detached/background, `-s` = nome della sessione — usa lo stesso
-   `<nome-istanza>` così è facile da trovare dopo, `-c` = directory di
-   lavoro, di norma la root del progetto). L'utente può collegarsi in
-   qualunque momento con `tmux attach -t <nome-istanza>` (e scollegarsi
-   senza killare la sessione con `Ctrl-b d`), o vedere tutte le sessioni
-   attive con `tmux ls`. Questa sintassi è standard tmux, stabile da anni —
-   niente di specifico da verificare come per herdr/paseo.
+   **Con tmux** (SOLO se herdr non è disponibile affatto — standard, alloca
+   un vero pty in background; a differenza di paseo, `tmux new-session`
+   esegue letteralmente il comando che gli passi, non lo tratta come
+   prompt): dalla directory del progetto, esegui `tmux new-session -d -s
+   <nome-istanza> -c <working-dir> "po start --instance <nome-istanza>
+   --role <ruolo>"` (`-d` = detached/background, `-s` = nome della sessione
+   — usa lo stesso `<nome-istanza>` così è facile da trovare dopo, `-c` =
+   directory di lavoro, di norma la root del progetto). L'utente può
+   collegarsi in qualunque momento con `tmux attach -t <nome-istanza>` (e
+   scollegarsi senza killare la sessione con `Ctrl-b d`), o vedere tutte le
+   sessioni attive con `tmux ls`. Questa sintassi è standard tmux, stabile
+   da anni — niente di specifico da verificare come per herdr/paseo.
 
    In tutti i casi: il comando di lancio **non include mai nessun
    task** — lancia l'istanza vuota, in ascolto. Lanci così TUTTE le istanze

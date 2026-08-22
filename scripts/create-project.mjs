@@ -340,7 +340,10 @@ export async function runCreateProject({ packageRoot, cwd, argv }) {
 	console.log("che invocano) vengono cablate nella sessione, dall'installazione globale del pacchetto (non dal progetto scaffoldato —");
 	console.log("questo scaffold non le include). Lanciato a mano, il planner parte comunque ma senza quelle skill: usa in automatico un");
 	console.log("metodo di scoping equivalente ma più semplice, integrato nel suo prompt (vedi Revisione 38 in docs/development-notes.md).");
-	console.log("coder/reviewer/specialisti non hanno bisogno di questo — per loro `pi -e ...` a mano va benissimo. Il planner userà gli 8");
+	console.log("coder/reviewer/specialisti non hanno bisogno di questo — per loro basta `po start --instance <nome> --role <ruolo>`");
+	console.log("(Revisione 44 — nessun `-e` a mano, funziona per qualunque ruolo esattamente come per planner, senza le skill mattpocock)");
+	console.log("oppure `pi --instance <nome> --role <ruolo>` direttamente, MAI `pi -e extensions/orchestrator.ts ...`: questo scaffold non");
+	console.log("include più quel file (Revisione 33), l'estensione si carica da sola dall'installazione globale. Il planner userà gli 8");
 	console.log("tool del layer ticket/DAG di default fin dal primo task (vedi .pi/extensions/multiAgentOrchestrator/prompts/planner.md).");
 }
 

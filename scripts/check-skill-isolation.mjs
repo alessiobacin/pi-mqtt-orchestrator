@@ -1,10 +1,10 @@
 // Verifica che le skill vendorizzate in skills-vendor/mattpocock/ (wayfinder,
 // to-spec, grilling, domain-modeling, setup-matt-pocock-skills — Revisione
-// 22, vedi docs/mvp-notes.md) siano cablate SOLO per il ruolo planner, mai
+// 22, vedi docs/development-notes.md) siano cablate SOLO per il ruolo planner, mai
 // per coder/reviewer/specialisti. Controlli statici (file di config, testo
 // dei prompt, comportamento di scripts/launch-planner.mjs) — non lancia un
 // vero `pi` (non installato in questo sandbox, vedi Revisione 22 in
-// docs/mvp-notes.md per il limite dichiarato: verificato solo a livello di
+// docs/development-notes.md per il limite dichiarato: verificato solo a livello di
 // logica/lettura del codice, mai contro un binario pi reale).
 //
 // Usage: node scripts/check-skill-isolation.mjs
@@ -48,7 +48,7 @@ for (const [roleName, cfg] of Object.entries(roles)) {
 }
 console.log("   OK");
 
-console.log("3. scripts/launch-planner.mjs esiste, forza --role planner, e include tutti e 5 i --skill...");
+console.log("3. scripts/launch-planner.mjs esiste, referenzia tutte e 5 le skill mattpocock (attaccate solo quando il ruolo risolto è planner)...");
 const launcherSrc = read("scripts/launch-planner.mjs");
 assert.match(launcherSrc, /MATT_POCOCK_SKILLS/, "launch-planner.mjs deve referenziare la lista delle skill mattpocock");
 for (const name of MATT_POCOCK_SKILLS) {
@@ -68,24 +68,19 @@ for (const name of MATT_POCOCK_SKILLS) {
 }
 console.log("   OK");
 
-console.log("5. launch-planner.mjs rifiuta esplicitamente un --role diverso da planner (es. coder)...");
-let rejectedOtherRole = false;
-try {
-	execFileSync("node", ["scripts/launch-planner.mjs", "--instance", "coder-check", "--role", "coder", "--print-only"], {
-		cwd: repoRoot,
-		encoding: "utf8",
-		stdio: "pipe",
-	});
-} catch (err) {
-	rejectedOtherRole = err.status === 1;
-}
-assert.equal(rejectedOtherRole, true, "launch-planner.mjs deve uscire con exit code 1 se --role non è planner");
+console.log("5. launch-planner.mjs (Revisione 44) ACCETTA un --role diverso da planner (es. coder), ma senza NESSUN --skill mattpocock...");
+const printedCoder = execFileSync("node", ["scripts/launch-planner.mjs", "--instance", "coder-check", "--role", "coder", "--print-only"], {
+	cwd: repoRoot,
+	encoding: "utf8",
+});
+assert.match(printedCoder, /--role coder/, "il comando composto per --role coder deve includere --role coder");
+assert.ok(!printedCoder.includes("--skill"), "il comando composto per --role coder NON deve includere alcun flag --skill");
 console.log("   OK");
 
 console.log("6. nessun altro script/prompt referenzia skills-vendor/mattpocock con un ruolo diverso da planner...");
 // Cerca ogni occorrenza di "skills-vendor/mattpocock" fuori da: la cartella
 // stessa, launch-planner.mjs, check-skill-isolation.mjs (questo file),
-// README.md, docs/mvp-notes.md, AGENTS.md, docs/agents/*.md, e la sezione
+// README.md, docs/development-notes.md, AGENTS.md, docs/agents/*.md, e la sezione
 // "planner" di prompts/planner.md (l'unico prompt che deve nominarle).
 const { execFileSync: exec2 } = await import("node:child_process");
 let grepOut = "";
@@ -103,7 +98,6 @@ const allowedFiles = new Set(
 		"scripts/launch-planner.mjs",
 		"scripts/check-skill-isolation.mjs",
 		"README.md",
-		"docs/mvp-notes.md",
 		"docs/development-notes.md",
 		"AGENTS.md",
 		"docs/agents/issue-tracker.md",

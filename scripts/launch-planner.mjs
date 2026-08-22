@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// Lancia una istanza `pi` con --role planner, includendo automaticamente i
-// flag --skill per le skill vendorizzate di mattpocock/skills
-// (skills-vendor/mattpocock/, vedi VERSION.md lì dentro) — wayfinder,
-// to-spec, grilling, domain-modeling, setup-matt-pocock-skills.
+// Lancia una istanza `pi` per QUALUNQUE ruolo (Revisione 44 — prima solo
+// planner, vedi sotto), includendo automaticamente i flag --skill per le
+// skill vendorizzate di mattpocock/skills (skills-vendor/mattpocock/, vedi
+// VERSION.md lì dentro) — wayfinder, to-spec, grilling, domain-modeling,
+// setup-matt-pocock-skills — MA SOLO quando il ruolo risolto è "planner"
+// (default se --role non è passato affatto, per compatibilità con l'uso
+// storico di questo script/`po start`).
 //
 // PERCHÉ QUESTO SCRIPT ESISTE (Revisione 22, vedi docs/development-notes.md):
 // extensions/orchestrator.ts non compone MAI il comando che lancia un nuovo
@@ -10,23 +13,37 @@
 // chiamate di self-report/rename verso herdr e per `git` (vedi
 // herdrReportAgent()/herdrRenamePane()/gitExec... più sotto nel file). Le
 // istanze del team vengono lanciate dal planner stesso via shell, seguendo
-// il testo di prompts/planner.md (herdr o paseo) — mai per un altro
+// il testo di prompts/planner.md (herdr o tmux) — mai per un altro
 // planner, visto che l'architettura attuale non ne spawna mai un secondo.
 // planner-01 stesso viene avviato a mano dall'utente (vedi README
 // Quickstart). Questo script è quindi il vero "punto" in cui gli argomenti
-// del processo pi per il ruolo planner vengono composti — non un ramo
-// dentro orchestrator.ts, che non esiste.
+// del processo pi vengono composti — non un ramo dentro orchestrator.ts,
+// che non esiste.
 //
 // Uso:
 //   node scripts/launch-planner.mjs --instance planner-01 [--name "Planner"] [altri flag pi...]
+//   node scripts/launch-planner.mjs --instance coder-01 --role coder   # Revisione 44: qualunque ruolo, non solo planner
 //   node scripts/launch-planner.mjs --instance planner-01 --print-only   # stampa il comando composto, non lo esegue (verifica manuale)
 //   po start --instance planner-01   # dopo `npm install -g`/`npm link` (Revisione 31, vedi bin/po.mjs)
 //
-// Forza sempre --role planner: se l'utente passa esplicitamente un --role
-// diverso, lo script si rifiuta (questo script è SOLO per planner — per
-// altri ruoli va usato `pi -e extensions/orchestrator.ts` direttamente,
-// senza i flag --skill di mattpocock, che non devono raggiungere altri
-// ruoli).
+// Revisione 44 — generalizzato a QUALUNQUE ruolo, non solo planner (incidente
+// reale, vedi docs/development-notes.md): prima di questa revisione, questo
+// script si rifiutava con un --role diverso da "planner" e rimandava a "usa
+// `pi -e extensions/orchestrator.ts --role <ruolo>` direttamente" — un
+// consiglio diventato STALE dalla Revisione 33 (un progetto scaffoldato non
+// ha più quel file, l'estensione si carica da sola). Il planner, componendo
+// quel comando a mano dal proprio prompt (mai passando da questo script),
+// lanciava esattamente quel comando stale per lanciare coder/reviewer/
+// specialisti via herdr/tmux — il processo `pi` falliva subito
+// (`extensions/orchestrator.ts` non esiste nel progetto), il pannello/sessione
+// moriva immediatamente, e il planner doveva ridiagnosticare il problema da
+// capo ogni volta (osservato realmente: ~58k token di ragionamento sprecati
+// per riscoprire ciò che questo script già sapeva fare correttamente per
+// planner). Fix: questo script (quindi `po start`) ora gestisce QUALUNQUE
+// ruolo con la stessa identica logica di rilevamento `-e` già corretta per
+// planner dalla Revisione 33/38 — i flag --skill mattpocock restano
+// attaccati SOLO quando il ruolo risolto è "planner" (default se --role è
+// omesso), mai per altri ruoli.
 //
 // Revisione 31 — packageRoot vs cwd (importante per l'installazione globale):
 // prima di questa revisione lo script usava SEMPRE la propria directory
@@ -74,6 +91,7 @@ function resolveSkillPaths(packageRoot) {
 function parseArgs(argv) {
 	const passthrough = [];
 	let printOnly = false;
+	let role; // undefined finché non trovato — risolto a "planner" più sotto se mai passato
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === "--print-only") {
@@ -81,13 +99,9 @@ function parseArgs(argv) {
 			continue;
 		}
 		if (a === "--role") {
-			const value = argv[i + 1];
-			if (value !== "planner") {
-				console.error(
-					`launch-planner: questo script forza sempre --role planner (le skill mattpocock sono solo per planner) — ` +
-						`hai passato --role ${value ?? "<mancante>"}. Per altri ruoli usa direttamente ` +
-						`"pi -e extensions/orchestrator.ts --role <ruolo>", senza questo script.`,
-				);
+			role = argv[i + 1];
+			if (!role) {
+				console.error("launch-planner: --role richiede un valore (es. --role coder).");
 				process.exit(1);
 			}
 			i++; // consuma anche il valore, verrà comunque riaggiunto sotto in modo esplicito
@@ -95,7 +109,7 @@ function parseArgs(argv) {
 		}
 		passthrough.push(a);
 	}
-	return { passthrough, printOnly };
+	return { passthrough, printOnly, role: role ?? "planner" };
 }
 
 // runLaunchPlanner({ packageRoot, cwd, argv }) — packageRoot risolve le
@@ -124,7 +138,7 @@ function parseArgs(argv) {
 // `po init` scrive sempre: agents/roles.yaml oppure
 // .pi/extensions/multiAgentOrchestrator/config/project.json.
 export function runLaunchPlanner({ packageRoot, cwd, argv }) {
-	const { passthrough, printOnly } = parseArgs(argv);
+	const { passthrough, printOnly, role } = parseArgs(argv);
 
 	const orchestratorPath = path.join(cwd, "extensions", "orchestrator.ts");
 	const hasLocalExtension = existsSync(orchestratorPath);
@@ -186,13 +200,19 @@ export function runLaunchPlanner({ packageRoot, cwd, argv }) {
 		);
 	}
 
-	const skillFlags = resolveSkillPaths(packageRoot).flatMap((p) => ["--skill", p]);
+	// Revisione 44: le skill mattpocock restano riservate al planner — un
+	// --role diverso (coder/reviewer/specialista) non le riceve mai, stessa
+	// garanzia di isolamento verificata da scripts/check-skill-isolation.mjs.
+	const skillFlags = role === "planner" ? resolveSkillPaths(packageRoot).flatMap((p) => ["--skill", p]) : [];
 	// -e esplicito SOLO in sviluppo del pacchetto stesso (looksLikePackageRepo)
 	// — mai per una copia locale residua in un progetto scaffoldato, anche se
 	// esiste sul disco (vedi Revisione 38 sopra): l'estensione installata
-	// globalmente basta sempre da sola in quel caso.
+	// globalmente basta sempre da sola in quel caso. Questa logica di
+	// rilevamento vale per QUALUNQUE ruolo (Revisione 44), non solo planner —
+	// è esattamente ciò che mancava quando il planner componeva a mano
+	// `pi -e extensions/orchestrator.ts` per lanciare altri ruoli.
 	const extensionFlags = hasLocalExtension && looksLikePackageRepo ? ["-e", "extensions/orchestrator.ts"] : [];
-	const piArgs = [...extensionFlags, ...passthrough, "--role", "planner", ...skillFlags];
+	const piArgs = [...extensionFlags, ...passthrough, "--role", role, ...skillFlags];
 
 	const printable = ["pi", ...piArgs].map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");
 	console.log(`launch-planner: comando composto (cwd ${cwd}):\n  ${printable}\n`);
